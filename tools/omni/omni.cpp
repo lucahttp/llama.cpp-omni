@@ -4241,6 +4241,14 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
                 LOG_WRN("Vision CoreML model path does not exist: %s, skipping ANE\n", ctx_omni->params->vision_coreml_model_path.c_str());
             }
         }
+
+        // Set TRT engine path if available (for vision TRT acceleration)
+        if (ctx_vision && !ctx_omni->params->vision_trt_engine_path.empty()) {
+            vision_set_trt_vision_engine_path(ctx_vision,
+                ctx_omni->params->vision_trt_engine_path.c_str());
+            LOG_INF("Vision TRT engine path set to: %s\n",
+                    ctx_omni->params->vision_trt_engine_path.c_str());
+        }
     }
     
     ctx_omni->llm_thread_info = new LLMThreadInfo(1000);
@@ -4566,38 +4574,35 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
     }
         
     // ANE/CoreML warmup: pre-load models into NPU to avoid first-inference latency
-    omni_warmup_ane(ctx_omni);
+    omni_warmup_vision(ctx_omni);
 
     print_with_timestamp("=== omni_init success: ctx_llama = %p\n", (void*)ctx_omni->ctx_llama);
     return ctx_omni;
 }
 
 //
-// ANE/CoreML warmup — pre-load models into NPU to avoid first-inference latency
+// Vision encoder warmup — pre-load models (CoreML/ANE, TRT) to avoid first-inference latency
 //
-void omni_warmup_ane(struct omni_context * ctx_omni) {
-#if defined(__APPLE__)
+void omni_warmup_vision(struct omni_context * ctx_omni) {
     if (!ctx_omni) return;
 
-    LOG_INF("%s: starting ANE/CoreML warmup...\n", __func__);
+    LOG_INF("%s: starting vision encoder warmup...\n", __func__);
 
-    // 1. Vision ANE warmup
+    // 1. CoreML / ANE warmup
+#if defined(__APPLE__)
     if (ctx_omni->ctx_vision) {
         vision_coreml_warmup(ctx_omni->ctx_vision);
     }
-
-    // 2. Future: audio ANE warmup
-    // if (ctx_omni->ctx_audio) {
-    //     audition_coreml_warmup(ctx_omni->ctx_audio);
-    // }
-
-    // 3. Future: other module ANE warmup
-    // ...
-
-    LOG_INF("%s: ANE/CoreML warmup finished\n", __func__);
-#else
-    (void)ctx_omni;
 #endif
+
+    // 2. TRT warmup
+#if defined(GGML_USE_CUDA)
+    if (ctx_omni->ctx_vision) {
+        vision_trt_warmup(ctx_omni->ctx_vision);
+    }
+#endif
+
+    LOG_INF("%s: vision encoder warmup finished\n", __func__);
 }
 
 bool omni_tts_queues_empty(struct omni_context * ctx_omni) {

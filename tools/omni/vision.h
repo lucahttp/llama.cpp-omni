@@ -116,3 +116,8 @@ bool vision_get_batch_encode(const struct vision_ctx * ctx);
 void vision_set_coreml_model_path(struct vision_ctx * ctx, const char * coreml_model_path);
 bool vision_coreml_warmup(struct vision_ctx * ctx);
 bool vision_image_batch_encode_coreml(struct vision_ctx * ctx, const struct vision_image_f32_batch * imgs, float * vec);
+
+// TRT support
+void vision_set_trt_vision_engine_path(struct vision_ctx * ctx, const char * engine_path);
+bool vision_trt_warmup(struct vision_ctx * ctx);
+bool vision_image_batch_encode_trt(struct vision_ctx * ctx, const struct vision_image_f32_batch * imgs, float * vec);

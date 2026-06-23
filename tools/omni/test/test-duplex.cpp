@@ -324,6 +324,18 @@ int main(int argc, char ** argv) {
     if (vision_backend == "coreml") {
         params.vision_coreml_model_path = paths.vision_coreml;
     }
+    // TRT vision: auto-derive engine path from vision GGUF
+    if (params.vision_trt_engine_path.empty() && !params.vpm_model.empty()) {
+        std::string trt_path = params.vpm_model;
+        size_t pos = trt_path.rfind(".gguf");
+        if (pos != std::string::npos) {
+            trt_path.replace(pos, 5, ".plan");
+        }
+        std::ifstream ft(trt_path, std::ios::binary);
+        if (ft.good()) {
+            params.vision_trt_engine_path = trt_path;
+        }
+    }
 
     // 🔧 [bit-exact A/B] 固定 LLM / TTS 采样种子，配合 token2wav 中已有的 mt19937(42)
     // 让两次独立进程产生完全相同的输出（A/B 对比可用 md5 验证）

@@ -2,6 +2,45 @@
 
 find_package(Threads REQUIRED)
 
+# TensorRT for TRT-accelerated vision encoder
+# Set -DTRT_ROOT_DIR=/path/to/tensorrt to point to a TensorRT C++ SDK install
+# (the directory containing include/NvInfer.h and lib/libnvinfer.so).
+option(ENABLE_TRT_VISION "Use TensorRT for vision encoder" OFF)
+if(ENABLE_TRT_VISION)
+    if(NOT TRT_ROOT_DIR AND DEFINED ENV{TRT_ROOT})
+        set(TRT_ROOT_DIR "$ENV{TRT_ROOT}")
+    endif()
+    find_path(TRT_INCLUDE_DIR NvInfer.h
+              PATHS ${TRT_ROOT_DIR}
+              PATH_SUFFIXES include
+              NO_DEFAULT_PATH)
+    find_library(TRT_NVINFER_LIB nvinfer
+                 PATHS ${TRT_ROOT_DIR}
+                 PATH_SUFFIXES lib
+                 NO_DEFAULT_PATH)
+    if(NOT TRT_NVINFER_LIB)  # fallback: search system paths
+        find_library(TRT_NVINFER_LIB nvinfer)
+    endif()
+
+    # cudart: reuse if CUDAToolkit was already found, otherwise search
+    if(TARGET CUDA::cudart)
+        set(TRT_CUDA_LIB CUDA::cudart)
+        set(TRT_CUDA_LIB_IS_TARGET TRUE)
+        set(CUDA_INCLUDE_DIR "")
+    else()
+        find_library(TRT_CUDA_LIB cudart)
+        find_path(CUDA_INCLUDE_DIR cuda_runtime.h)
+    endif()
+
+    if(TRT_INCLUDE_DIR AND TRT_NVINFER_LIB AND TRT_CUDA_LIB)
+        message(STATUS "TensorRT found: ${TRT_INCLUDE_DIR}")
+        get_filename_component(TRT_LIB_DIR ${TRT_NVINFER_LIB} DIRECTORY)
+    else()
+        message(WARNING "TensorRT not found -- TRT vision disabled (set -DTRT_ROOT_DIR=/path/to/tensorrt)")
+        set(ENABLE_TRT_VISION OFF)
+    endif()
+endif()
+
 # CoreML / ANE support option：在 macOS 上默认开，其它平台默认关
 if(APPLE)
     option(ENABLE_COREML "Enable CoreML/ANE support for vision encoder" ON)
@@ -45,6 +84,19 @@ if(ENABLE_COREML)
     set_source_files_properties(coreml/coreml_t2w_dit.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 endif()
 
+# Add TRT vision encoder when enabled
+if(ENABLE_TRT_VISION)
+    target_sources(omni PRIVATE
+        trt/omni_trt.h
+        trt/omni_trt.cpp
+    )
+    target_include_directories(omni PRIVATE ${TRT_INCLUDE_DIR} ${CUDA_INCLUDE_DIR})
+    target_link_directories(omni PRIVATE ${TRT_LIB_DIR})
+    target_link_libraries(omni PRIVATE ${TRT_NVINFER_LIB} ${TRT_CUDA_LIB})
+    target_compile_definitions(omni PRIVATE ENABLE_TRT_VISION)
+    # Help executables linking omni find libnvinfer at link time via rpath-link
+    target_link_options(omni INTERFACE "SHELL:LINKER:-rpath-link,${TRT_LIB_DIR}")
+endif()
 target_link_libraries     (omni PUBLIC ggml llama llama-common)
 target_link_libraries     (omni PRIVATE Threads::Threads)
 target_include_directories(omni PUBLIC  .)
@@ -205,4 +257,32 @@ if(ENABLE_COREML)
     set_target_properties  (${TARGET_T2W_ANE_E2E} PROPERTIES OUTPUT_NAME llama-omni-test-t2w-ane-end2end)
     target_link_libraries  (${TARGET_T2W_ANE_E2E} PRIVATE llama-common omni Threads::Threads)
     target_compile_features(${TARGET_T2W_ANE_E2E} PRIVATE cxx_std_17)
+endif()
+
+# Standalone vision embedding dumper (GGUF baseline for A/B precision check)
+set(TARGET_DUMP_VISION_EMB llama-omni-dump-vision-emb)
+add_executable         (${TARGET_DUMP_VISION_EMB} test/dump_vision_emb.cpp)
+set_target_properties  (${TARGET_DUMP_VISION_EMB} PROPERTIES OUTPUT_NAME llama-omni-dump-vision-emb)
+target_link_libraries  (${TARGET_DUMP_VISION_EMB} PRIVATE omni Threads::Threads)
+target_compile_features(${TARGET_DUMP_VISION_EMB} PRIVATE cxx_std_17)
+
+# TRT vision encoder tests (only when TRT is available)
+if(ENABLE_TRT_VISION)
+    find_library(CUDA_DRIVER_LIB cuda)
+
+    # Standalone TRT vision benchmark
+    set(TARGET_TRT_VISION_TEST llama-omni-test-trt-vision)
+    add_executable         (${TARGET_TRT_VISION_TEST} test/trt/test_trt_vision.cpp)
+    set_target_properties  (${TARGET_TRT_VISION_TEST} PROPERTIES OUTPUT_NAME llama-omni-test-trt-vision)
+    target_link_libraries  (${TARGET_TRT_VISION_TEST} PRIVATE omni Threads::Threads ${TRT_NVINFER_LIB} ${TRT_CUDA_LIB} ${CUDA_DRIVER_LIB})
+    target_link_directories(${TARGET_TRT_VISION_TEST} PRIVATE ${TRT_LIB_DIR})
+    target_compile_features(${TARGET_TRT_VISION_TEST} PRIVATE cxx_std_17)
+
+    # GGUF vs TRT precision comparison
+    set(TARGET_TRT_COMPARE llama-omni-test-trt-compare)
+    add_executable         (${TARGET_TRT_COMPARE} test/trt/test_trt_compare.cpp)
+    set_target_properties  (${TARGET_TRT_COMPARE} PROPERTIES OUTPUT_NAME llama-omni-test-trt-compare)
+    target_link_libraries  (${TARGET_TRT_COMPARE} PRIVATE omni Threads::Threads ${TRT_NVINFER_LIB} ${TRT_CUDA_LIB} ${CUDA_DRIVER_LIB})
+    target_link_directories(${TARGET_TRT_COMPARE} PRIVATE ${TRT_LIB_DIR})
+    target_compile_features(${TARGET_TRT_COMPARE} PRIVATE cxx_std_17)
 endif()

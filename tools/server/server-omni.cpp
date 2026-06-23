@@ -11,6 +11,7 @@
 #include "ws_handler.h"
 
 #include <mutex>
+#include <memory>
 #include <thread>
 #include <queue>
 #include <condition_variable>
@@ -115,7 +116,16 @@ int main(int argc, char ** argv) {
 
     // HTTP server setup
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-    httplib::SSLServer svr(params.ssl_file_key.c_str(), params.ssl_file_cert.c_str());
+    // Use SSL only when cert and key are both provided; fall back to plain HTTP otherwise
+    std::unique_ptr<httplib::Server> svr_uptr;
+    if (!params.ssl_file_cert.empty() && !params.ssl_file_key.empty()) {
+        svr_uptr = std::make_unique<httplib::SSLServer>(
+            params.ssl_file_key.c_str(),
+            params.ssl_file_cert.c_str());
+    } else {
+        svr_uptr = std::make_unique<httplib::Server>();
+    }
+    auto & svr = *svr_uptr;
 #else
     httplib::Server svr;
 #endif

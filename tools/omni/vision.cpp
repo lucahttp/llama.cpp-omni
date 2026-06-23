@@ -12,6 +12,10 @@
 #include "coreml/omni_coreml.h"
 #endif
 
+#if defined(ENABLE_TRT_VISION)
+#include "trt/omni_trt.h"
+#endif
+
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
@@ -214,6 +218,9 @@ struct vision_ctx {
 
     // CoreML / ANE model path
     std::string coreml_model_path;
+
+    // TensorRT engine path
+    std::string trt_engine_path;
 
     ggml_backend_sched_ptr sched;
 
@@ -2550,6 +2557,12 @@ bool vision_image_encode(struct vision_ctx * ctx, const int n_threads, vision_im
         return vision_image_batch_encode_coreml(ctx, &imgs, vec);
     }
 #endif
+#if defined(ENABLE_TRT_VISION)
+    if (!ctx->trt_engine_path.empty()) {
+        LOG_INF("vision use TRT\n");
+        return vision_image_batch_encode_trt(ctx, &imgs, vec);
+    }
+#endif
     return vision_image_batch_encode(ctx, n_threads, &imgs, vec);
 }
 
@@ -2739,6 +2752,178 @@ bool vision_image_batch_encode_coreml(vision_ctx * ctx, const vision_image_f32_b
 #else
     (void)ctx; (void)imgs_c_ptr; (void)vec;
     LOG_ERR("%s: CoreML support not compiled. Rebuild with -DENABLE_COREML=ON\n", __func__);
+    return false;
+#endif
+}
+
+//
+// TRT support
+//
+void vision_set_trt_vision_engine_path(struct vision_ctx * ctx, const char * engine_path) {
+    if (ctx && engine_path) {
+        ctx->trt_engine_path = std::string(engine_path);
+        LOG_INF("%s: TRT engine path set to: %s\n", __func__, engine_path);
+    }
+}
+
+// forward declaration of the static trt encode function (defined below)
+#if defined(ENABLE_TRT_VISION)
+static bool vision_image_encode_trt(float * pixel_values, int32_t * position_ids, float * pos_embed_2d, float * vec, const char * engine_path);
+#endif
+
+bool vision_trt_warmup(struct vision_ctx * ctx) {
+#if defined(ENABLE_TRT_VISION)
+    if (!ctx || ctx->trt_engine_path.empty()) {
+        return false;
+    }
+
+    LOG_INF("%s: warming up vision TRT engine...\n", __func__);
+    const int64_t t_start_us = ggml_time_us();
+
+    // TRT engine fixed input shapes:
+    //   pixel_values:  [1, 3, 14, 14336]
+    //   position_ids:  [1, 1024]
+    //   pos_embed_2d:  [1, 1024, embed_dim]
+    //   output:        [1, n_query, embed_dim]
+    const int embed_dim = vision_n_mmproj_embd(ctx);
+    const int n_query   = vision_n_output_tokens(ctx);
+    const int n_pixels  = 3 * 14 * 14336;
+    const int n_pos     = 1024;
+
+    std::vector<float>   dummy_pixels(n_pixels, 0.0f);
+    std::vector<int32_t> dummy_pos_ids(n_pos, 0);
+    std::vector<float>   dummy_pos_embed(n_pos * embed_dim, 0.0f);
+    std::vector<float>   dummy_output(n_query * embed_dim, 0.0f);
+
+    // run a full dummy inference to trigger TRT engine loading & compilation
+    bool ok = vision_image_encode_trt(
+        dummy_pixels.data(), dummy_pos_ids.data(), dummy_pos_embed.data(),
+        dummy_output.data(), ctx->trt_engine_path.c_str()
+    );
+
+    const int64_t t_end_us = ggml_time_us();
+    if (ok) {
+        LOG_INF("%s: vision TRT warmup done in %.2f ms\n", __func__, (t_end_us - t_start_us) / 1000.0);
+    } else {
+        LOG_WRN("%s: vision TRT warmup failed\n", __func__);
+    }
+    return ok;
+#else
+    (void)ctx;
+    return false;
+#endif
+}
+
+#if defined(ENABLE_TRT_VISION)
+static bool vision_image_encode_trt(float * pixel_values, int32_t * position_ids, float * pos_embed_2d, float * vec, const char * engine_path) {
+    static int flag = 0;
+    static omni::vision::OmniTrt * trtEncoder = nullptr;
+    static std::string cached_engine_path = "";
+
+    // Check if we need to load a new engine
+    if (flag == 0 || (engine_path && cached_engine_path != engine_path)) {
+        if (trtEncoder) {
+            delete trtEncoder;
+        }
+        trtEncoder = new omni::vision::OmniTrt();
+        if (!trtEncoder->init(engine_path)) {
+            LOG_ERR("%s: TRT engine init failed\n", __func__);
+            delete trtEncoder;
+            trtEncoder = nullptr;
+            return false;
+        }
+        cached_engine_path = engine_path ? engine_path : "";
+        flag = 1;
+    }
+    trtEncoder->run(pixel_values, position_ids, pos_embed_2d, vec);
+    return true;
+}
+#endif
+
+bool vision_image_batch_encode_trt(vision_ctx * ctx, const vision_image_f32_batch * imgs_c_ptr, float * vec) {
+#if defined(ENABLE_TRT_VISION)
+    const vision_image_f32_batch & imgs = *imgs_c_ptr;
+    int batch_size = imgs.entries.size();
+
+    if (batch_size != 1) {
+        return false; // only support batch size of 1
+    }
+
+    const auto & model   = ctx->model;
+    const auto & hparams = model.hparams;
+
+    const int image_size_width  = imgs.entries[0]->nx;
+    const int image_size_height = imgs.entries[0]->ny;
+    const int patch_size    = hparams.patch_size;
+    const int pos_w = image_size_width  / patch_size;
+    const int pos_h = image_size_height / patch_size;
+
+    std::vector<float>   inp_raw;
+    std::vector<int32_t> positions;
+    std::vector<float>   pos_embed;
+
+    // prepare inp_raw: rearrange image pixels into patch layout
+    // TRT engine expects [1, 3, 14, 14336] where patches are laid out horizontally
+    {
+        const int max_patches = 1024;
+        const int nx = max_patches * patch_size;
+        const int ny = patch_size;
+        const int n = nx * ny;
+        inp_raw.assign(3 * n, 0.0f);
+
+        int patch_index = 0;
+        for (int i = 0; i < image_size_height && patch_index < max_patches; i += patch_size) {
+            for (int j = 0; j < image_size_width && patch_index < max_patches; j += patch_size) {
+                for (int pi = 0; pi < patch_size; ++pi) {
+                    for (int pj = 0; pj < patch_size; ++pj) {
+                        int src_index = ((i + pi) * image_size_width + (j + pj)) * 3;
+                        int dst_index = nx * pi + patch_index * patch_size + pj;
+                        inp_raw[dst_index]         = imgs.entries[0]->buf[src_index];
+                        inp_raw[n + dst_index]     = imgs.entries[0]->buf[src_index + 1];
+                        inp_raw[2 * n + dst_index] = imgs.entries[0]->buf[src_index + 2];
+                    }
+                }
+                patch_index++;
+            }
+        }
+    }
+
+    // prepare position_ids
+    {
+        positions.assign(std::max(pos_h * pos_w, 1024), 0);
+        int bucket_coords_h[1024];
+        int bucket_coords_w[1024];
+        for (int i = 0; i < pos_h; i++){
+            bucket_coords_h[i] = std::floor(70.0*i/pos_h);
+        }
+        for (int i = 0; i < pos_w; i++){
+            bucket_coords_w[i] = std::floor(70.0*i/pos_w);
+        }
+        for (int i = 0, id = 0; i < pos_h; i++){
+            for (int j = 0; j < pos_w; j++){
+                positions[id++] = bucket_coords_h[i]*70 + bucket_coords_w[j];
+            }
+        }
+    }
+
+    // prepare pos_embed_2d
+    {
+        int embed_dim = vision_n_mmproj_embd(ctx);
+
+        auto pos_embed_t = get_2d_sincos_pos_embed(embed_dim, std::make_pair(pos_w, pos_h));
+
+        pos_embed.assign(embed_dim * std::max(pos_w * pos_h, 1024), 0.0f);
+        for(int i = 0; i < pos_w * pos_h; ++i){
+            for(int j = 0; j < embed_dim; ++j){
+                pos_embed[i * embed_dim + j] = pos_embed_t[i][j];
+            }
+        }
+    }
+
+    return vision_image_encode_trt(inp_raw.data(), positions.data(), pos_embed.data(), vec, ctx->trt_engine_path.c_str());
+#else
+    (void)ctx; (void)imgs_c_ptr; (void)vec;
+    LOG_ERR("%s: TRT support not compiled. Rebuild with -DENABLE_TRT_VISION=ON\n", __func__);
     return false;
 #endif
 }

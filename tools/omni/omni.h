@@ -495,8 +495,8 @@ void omni_free(struct omni_context * ctx_omni);
 // new session, without tearing down the loaded model (unlike omni_free).
 void omni_prepare_for_reuse(struct omni_context * ctx_omni);
 
-// ANE/CoreML warmup — call once after omni_init to pre-load models into NPU
-void omni_warmup_ane(struct omni_context * ctx_omni);
+// Vision encoder warmup — call once after omni_init to pre-load models (CoreML/ANE, TRT)
+void omni_warmup_vision(struct omni_context * ctx_omni);
 
 // 检查 TTS 和 T2W 队列是否都为空
 bool omni_tts_queues_empty(struct omni_context * ctx_omni);
