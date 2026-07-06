@@ -176,4 +176,3 @@ pt/
 tools/omni/**/pt/
 *.onnx
 *.plan
-MiniCPM-o/

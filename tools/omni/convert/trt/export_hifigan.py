@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""Export FULL HiFi-GAN vocoder (mel + source_stft → 18ch), matching ggml build_graph_decode exactly."""
+"""Export dual-input HiFi-GAN vocoder (mel + source_stft -> 18ch) to ONNX.
+Run from llama.cpp-omni repo root:
+  python3 tools/omni/convert/trt/export_hifigan.py --gguf ./hifigan2.gguf --output ./vocoder.onnx
+"""
 
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../gguf-py"))
+import os, argparse
+
 from gguf import GGUFReader
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-GGUF_PATH = os.environ.get("GGUF_PATH",
-    "/models/MiniCPM-o-4_5-gguf/token2wav-gguf/hifigan2.gguf")
+parser = argparse.ArgumentParser(description="Export dual-input HiFi-GAN to ONNX (dynamic axes)")
+parser.add_argument("--gguf",   required=True,  help="Path to hifigan2.gguf")
+parser.add_argument("--output", default="./vocoder_full.onnx", help="Output ONNX path")
+args = parser.parse_args()
 
-reader = GGUFReader(GGUF_PATH)
+reader = GGUFReader(args.gguf)
 def g2t(t):
     s = list(t.shape)
     if len(s) <= 1:
@@ -180,7 +185,7 @@ with torch.no_grad():
     out = m(dummy_mel, dummy_src)
 print(f"mel {list(dummy_mel.shape)} + src {list(dummy_src.shape)} → stft {list(out.shape)}")
 
-ONNX = os.environ.get("ONNX_OUTPUT", "/workspace/vocoder_full.onnx")
+ONNX = args.output
 torch.onnx.export(
     m, (dummy_mel, dummy_src), ONNX,
     input_names=["mel", "source_stft"],

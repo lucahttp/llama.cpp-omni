@@ -1,7 +1,7 @@
 #pragma once
 
-#ifdef USE_TRT_VOCODER
-#include "../trt_vocoder.h"
+#ifdef ENABLE_TRT_VOCODER
+#include "trt/trt_vocoder.h"
 #endif
 
 #include <cstdint>
@@ -1964,8 +1964,6 @@ struct hg2_hift_generator {
     std::vector<hg2_resblock> resblocks;
     ggml_tensor * conv_post_weight = nullptr;
     ggml_tensor * conv_post_bias   = nullptr;
-    ggml_tensor * dbg_source_stft_tcb = nullptr;
-    ggml_tensor * dbg_post_tcb        = nullptr;
     bool build_graph_forward(ggml_context * ctx,
                              ggml_tensor *  speech_feat_c80_t_b,
                              ggml_tensor *  cache_source_t1_b,
@@ -2226,7 +2224,8 @@ class Token2Wav {
                      const std::string & vocoder_gguf,
                      const std::string & device_token2mel    = "gpu",
                      const std::string & device_vocoder      = "gpu",
-                     const std::string & coreml_model_path  = "");
+                     const std::string & coreml_model_path  = "",
+                     const std::string & trt_vocoder_engine = "");
 
     bool start_stream_with_prompt_cache_gguf(const std::string & prompt_cache_gguf_path,
                                              int                 n_timesteps = -1,
@@ -2258,8 +2257,8 @@ class Token2Wav {
 
     omni::vocoder::voc_hg2_model  voc_model_{};
     omni::vocoder::voc_hg2_runner voc_runner_{};
-#ifdef USE_TRT_VOCODER
-    omni::vocoder::TRTVocoder      trt_vocoder_{};
+#ifdef ENABLE_TRT_VOCODER
+    omni::vocoder::TrtVocoder      trt_vocoder_{};
     bool                            use_trt_vocoder_ = false;
 #endif
 
@@ -2288,7 +2287,8 @@ struct Token2WavSession {
                                      const std::string & device_vocoder      = "gpu",
                                      int                 n_timesteps         = 10,
                                      float               temperature         = 1.0f,
-                                     const std::string & coreml_model_path  = "");
+                                     const std::string & coreml_model_path  = "",
+                                     const std::string & trt_vocoder_engine  = "");
 
     bool init_from_prompt_bundle(const std::string & encoder_gguf,
                                  const std::string & flow_matching_gguf,
@@ -2299,7 +2299,8 @@ struct Token2WavSession {
                                  const std::string & device_vocoder      = "gpu",
                                  int                 n_timesteps         = 10,
                                  float               temperature         = 1.0f,
-                                 const std::string & coreml_model_path  = "");
+                                 const std::string & coreml_model_path  = "",
+                                 const std::string & trt_vocoder_engine  = "");
 
     bool feed_tokens(const int32_t * tokens, int64_t n_tokens, bool is_final, std::vector<float> & wave_bt_out);
 

@@ -5389,14 +5389,6 @@ bool hg2_hift_generator::build_graph_decode(ggml_context * ctx,
                                             ggml_tensor *  source_t1_b,
                                             ggml_tensor ** out_wave_t_b,
                                             ggml_tensor ** out_source_stft) {
-    dbg_source_stft_tcb = nullptr;
-    dbg_post_tcb        = nullptr;
-    const bool dump_enabled = std::getenv("OMNI_VOC_DUMP_DIR") != nullptr;
-    auto keep_dbg = [&](ggml_tensor * t, ggml_tensor ** slot) {
-        if (dump_enabled && t && slot) {
-            *slot = ggml_dup(ctx, t);
-        }
-    };
     if (!ctx || !speech_feat_c80_t_b || !source_t1_b || !out_wave_t_b) {
         return false;
     }
@@ -5438,7 +5430,6 @@ bool hg2_hift_generator::build_graph_decode(ggml_context * ctx,
     stft_imag_tfb               = ggml_cont(ctx, stft_imag_tfb);
     ggml_tensor * s_stft_tcb    = ggml_concat(ctx, stft_real_tfb, stft_imag_tfb, 1);
     s_stft_tcb                  = ggml_cont(ctx, s_stft_tcb);
-    keep_dbg(s_stft_tcb, &dbg_source_stft_tcb);
 
     // Early exit for source-only mode (used by TRT integration)
     if (out_source_stft) {
@@ -5560,7 +5551,6 @@ bool hg2_hift_generator::build_graph_decode(ggml_context * ctx,
         return false;
     }
     post_tcb = ggml_cont(ctx, post_tcb);
-    keep_dbg(post_tcb, &dbg_post_tcb);
     const int64_t TT    = post_tcb->ne[0];
     const int64_t Cpost = post_tcb->ne[1];
     if (Cpost != 18) {
@@ -6605,21 +6595,6 @@ void hg_t1b_to_bt1(const std::vector<float> & t1b, int64_t T, int64_t B, std::ve
         }
     }
 }
-bool hg_dump_f32_raw(const char * dir, const char * tag, int idx, int64_t T, int64_t C, const std::vector<float> & data) {
-    if (!dir || !*dir || !tag || !*tag) {
-        return false;
-    }
-    char path[1024];
-    std::snprintf(path, sizeof(path), "%s/%s_%03d_T%lld_C%lld.f32", dir, tag, idx, (long long) T, (long long) C);
-    std::ofstream out(path, std::ios::binary);
-    if (!out) {
-        std::fprintf(stderr, "OMNI_VOC_DUMP: failed to open %s\n", path);
-        return false;
-    }
-    out.write(reinterpret_cast<const char *>(data.data()), (std::streamsize) (data.size() * sizeof(float)));
-    std::fprintf(stderr, "OMNI_VOC_DUMP: wrote %s (%zu floats)\n", path, data.size());
-    return true;
-}
 }  // namespace
 bool voc_hg2_model::voc_hg2_model_init_from_gguf(const std::string & gguf_path_in,
                                                  const std::string & device,
@@ -6742,17 +6717,6 @@ bool voc_hg2_runner::voc_hg2_runner_build_graph(ggml_context * ctx,
     source_t1_b = ggml_cont(ctx, source_t1_b);
     ggml_build_forward_expand(gf, wave_t_b);
     ggml_build_forward_expand(gf, source_t1_b);
-    if (std::getenv("OMNI_VOC_DUMP_DIR")) {
-        ggml_tensor * dbg_nodes[] = {
-            model->hg2->gen.dbg_source_stft_tcb,
-            model->hg2->gen.dbg_post_tcb,
-        };
-        for (ggml_tensor * t : dbg_nodes) {
-            if (t) {
-                ggml_build_forward_expand(gf, t);
-            }
-        }
-    }
     *out_wave_t_b    = wave_t_b;
     *out_source_t1_b = source_t1_b;
     return true;
@@ -6847,24 +6811,6 @@ bool voc_hg2_runner::voc_hg2_runner_eval_stream(const std::vector<float> & speec
             LOG_ERROR( "voc_hg2_runner_eval_stream: ggml_backend_graph_compute failed\n");
             ggml_free(ctx);
             return false;
-        }
-    }
-    if (const char * dump_dir = std::getenv("OMNI_VOC_DUMP_DIR")) {
-        static std::atomic<int> dump_idx{0};
-        const int idx = dump_idx.fetch_add(1);
-        if (idx < 8) {
-            hg_dump_f32_raw(dump_dir, "ggml_mel", idx, T_mel, C, speech_feat_bct);
-            auto dump_dbg = [&](const char * tag, ggml_tensor * t) {
-                if (!t) {
-                    return;
-                }
-                std::vector<float> tcb;
-                if (hg_read_tensor_3d_tcb_f32(model->backend, t, tcb)) {
-                    hg_dump_f32_raw(dump_dir, tag, idx, t->ne[0], t->ne[1], tcb);
-                }
-            };
-            dump_dbg("ggml_src", model->hg2->gen.dbg_source_stft_tcb);
-            dump_dbg("ggml_post", model->hg2->gen.dbg_post_tcb);
         }
     }
     omni::flow::profile::ScopeTimer _download_timer("voc.download");
@@ -9855,7 +9801,8 @@ bool Token2Wav::load_models(const std::string & encoder_gguf,
                             const std::string & vocoder_gguf,
                             const std::string & device_token2mel,
                             const std::string & device_vocoder,
-                            const std::string & coreml_model_path) {
+                            const std::string & coreml_model_path,
+                            const std::string & trt_vocoder_engine) {
     reset_stream();
 
     constexpr int kDefaultThreads = 8;
@@ -9874,15 +9821,14 @@ bool Token2Wav::load_models(const std::string & encoder_gguf,
     voc_runner_.model = &voc_model_;
     models_loaded_    = true;
 
-#ifdef USE_TRT_VOCODER
-    const char * trt_engine = std::getenv("OMNI_TRT_VOCODER_ENGINE");
-    if (trt_engine && trt_engine[0]) {
-        omni::vocoder::TRTVocoderConfig cfg;
-        cfg.engine_path = trt_engine;
-        cfg.T_mel       = 100;
+#ifdef ENABLE_TRT_VOCODER
+    if (!trt_vocoder_engine.empty()) {
+        omni::vocoder::TrtVocoderConfig cfg;
+        cfg.engine_path = trt_vocoder_engine;
+        cfg.max_mel_frames = 100;
         if (trt_vocoder_.init(cfg)) {
             use_trt_vocoder_ = true;
-            fprintf(stderr, "[TRT] TRT vocoder enabled: %s\n", trt_engine);
+            fprintf(stderr, "[TRT] TRT vocoder enabled: %s\n", trt_vocoder_engine.c_str());
         }
     }
 #endif
@@ -9993,7 +9939,7 @@ bool Token2Wav::push_tokens_window(const int32_t *      tokens,
     const auto t_voc0 = clock::now();
 
     bool voc_ok = false;
-#ifdef USE_TRT_VOCODER
+#ifdef ENABLE_TRT_VOCODER
     if (use_trt_vocoder_) {
         std::vector<float> src_stft;
         voc_ok = voc_runner_.compute_source_stft(mel_in_bct, T_mel, voc_cache_source_bt1_, voc_Tc_, src_stft,

@@ -4400,14 +4400,21 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
                 print_with_timestamp("Token2Wav: CoreML model = %s\n", coreml_model_path.c_str());
             }
 
+            const std::string trt_vocoder_engine = ctx_omni->params->token2wav_trt_vocoder_engine;
+            if (!trt_vocoder_engine.empty()) {
+                print_with_timestamp("Token2Wav: TRT vocoder engine = %s\n", trt_vocoder_engine.c_str());
+            }
+
             init_ok = ctx_omni->token2wav_session->init_from_prompt_cache_gguf(
                     encoder_gguf, flow_matching_gguf, flow_extra_gguf, prompt_cache_gguf,
-                    vocoder_gguf, device_token2mel, device_vocoder, 5, 1.0f, coreml_model_path);
+                    vocoder_gguf, device_token2mel, device_vocoder, 5, 1.0f, coreml_model_path,
+                    trt_vocoder_engine);
             if (!init_ok && use_prompt_bundle) {
                 print_with_timestamp("Token2Wav: prompt_cache failed, fallback to prompt_bundle from %s\n", prompt_bundle_dir.c_str());
                 init_ok = ctx_omni->token2wav_session->init_from_prompt_bundle(
                         encoder_gguf, flow_matching_gguf, flow_extra_gguf, prompt_bundle_dir,
-                        vocoder_gguf, device_token2mel, device_vocoder, 5, 1.0f);
+                        vocoder_gguf, device_token2mel, device_vocoder, 5, 1.0f, coreml_model_path,
+                        trt_vocoder_engine);
             }
             // Fallback to CPU
             if (!init_ok) {

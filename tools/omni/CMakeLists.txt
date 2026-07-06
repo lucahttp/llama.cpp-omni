@@ -3,8 +3,8 @@
 find_package(Threads REQUIRED)
 
 # TensorRT for TRT-accelerated vocoder
-option(USE_TRT_VOCODER "Use TensorRT for HiFi-GAN vocoder" OFF)
-if(USE_TRT_VOCODER)
+option(ENABLE_TRT_VOCODER "Enable TensorRT-accelerated HiFi-GAN vocoder" OFF)
+if(ENABLE_TRT_VOCODER)
     find_path(TRT_INCLUDE_DIR NvInfer.h
               PATHS /usr/include/aarch64-linux-gnu /usr/local/tensorrt/include)
     find_library(TRT_NVINFER_LIB nvinfer
@@ -16,7 +16,7 @@ if(USE_TRT_VOCODER)
         set(TRT_FOUND TRUE)
     else()
         message(WARNING "TensorRT not found — TRT vocoder disabled")
-        set(USE_TRT_VOCODER OFF)
+        set(ENABLE_TRT_VOCODER OFF)
     endif()
 endif()
 
@@ -67,12 +67,12 @@ target_link_libraries     (omni PUBLIC ggml llama llama-common)
 target_link_libraries     (omni PRIVATE Threads::Threads)
 
 # TRT vocoder
-if(USE_TRT_VOCODER)
-    target_sources(omni PRIVATE trt_vocoder.cpp trt_vocoder.h)
+if(ENABLE_TRT_VOCODER)
+    target_sources(omni PRIVATE trt/trt_vocoder.cpp trt/trt_vocoder.h)
     target_include_directories(omni PRIVATE ${TRT_INCLUDE_DIR})
     target_include_directories(omni PRIVATE /usr/local/cuda/targets/aarch64-linux/include)
     target_link_libraries(omni PRIVATE ${TRT_NVINFER_LIB} ${TRT_CUDA_LIB})
-    target_compile_definitions(omni PRIVATE USE_TRT_VOCODER)
+    target_compile_definitions(omni PRIVATE ENABLE_TRT_VOCODER)
 endif()
 target_include_directories(omni PUBLIC  .)
 target_include_directories(omni PRIVATE ../..)

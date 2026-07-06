@@ -589,6 +589,9 @@ struct common_params {
     std::string vision_coreml_model_path     = ""; // path to CoreML .mlmodelc for vision ANE
     std::string token2wav_coreml_model_path  = ""; // path to CoreML model (.mlmodelc/.mlpackage) for token2wav DiT
 
+    // TensorRT support
+    std::string token2wav_trt_vocoder_engine = ""; // path to TensorRT .plan engine for token2wav vocoder
+
     // finetune
     struct lr_opt lr;
     enum ggml_opt_optimizer_type optimizer = GGML_OPT_OPTIMIZER_TYPE_ADAMW;
