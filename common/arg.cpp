@@ -560,6 +560,13 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
                     continue;
                 }
 
+                const bool config_value_optional =
+                    opt.handler_string && !opt.args.empty() && std::string(opt.args[0]) == "--config";
+                if (config_value_optional && (i + 1 >= argc || argv[i + 1][0] == '-')) {
+                    opt.handler_string(params, "auto");
+                    continue;
+                }
+
                 // arg with single value
                 check_arg(i);
                 std::string val = argv[++i];
@@ -1097,27 +1104,17 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
-        {"--profile"}, "NAME",
-        "select an Omni runtime profile (supported: auto)",
+        {"--config"}, "[NAME|PATH]",
+        "Omni JSON defaults. Omit NAME or pass auto to pick metal/cuda/cuda-2gpu/cpu. Other accelerators have no bundled file. Explicit CLI flags override JSON values. Optional modules with missing files are skipped.",
         [](common_params & params, const std::string & value) {
-            if (value != "auto") {
-                throw std::invalid_argument("unsupported Omni runtime profile: " + value);
-            }
-            params.omni_runtime_profile.profile = value;
+            params.omni_config.path = value.empty() ? "auto" : value;
         }
     ).set_examples({LLAMA_EXAMPLE_OMNI_SERVER}));
     add_opt(common_arg(
         {"--model-dir"}, "DIR",
-        "directory containing the MiniCPM-o 4.5 GGUF model tree used by --profile",
+        "model tree used to resolve relative paths in --config",
         [](common_params & params, const std::string & value) {
-            params.omni_runtime_profile.model_dir = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_OMNI_SERVER}));
-    add_opt(common_arg(
-        {"--profile-config"}, "PATH",
-        "static JSON runtime profile read by --profile auto (default: MODEL_DIR/omni-runtime-profile.json)",
-        [](common_params & params, const std::string & value) {
-            params.omni_runtime_profile.profile_config = value;
+            params.omni_config.model_dir = value;
         }
     ).set_examples({LLAMA_EXAMPLE_OMNI_SERVER}));
     add_opt(common_arg(
@@ -1127,15 +1124,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             if (value <= 0) {
                 throw std::invalid_argument("--token2wav-threads must be positive");
             }
-            params.omni_runtime_profile.token2wav_threads = value;
-            params.omni_runtime_profile.token2wav_threads_explicit = true;
+            params.omni_config.token2wav_threads = value;
+            params.omni_config.token2wav_threads_explicit = true;
         }
     ).set_examples({LLAMA_EXAMPLE_OMNI_SERVER}));
     add_opt(common_arg(
         {"--print-effective-config"},
-        "print the resolved Omni runtime configuration and exit",
+        "print the resolved Omni configuration and exit",
         [](common_params & params) {
-            params.omni_runtime_profile.print_effective_config = true;
+            params.omni_config.print_effective_config = true;
         }
     ).set_examples({LLAMA_EXAMPLE_OMNI_SERVER}));
     add_opt(common_arg(
@@ -1316,7 +1313,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         string_format("size of the prompt context (default: %d, 0 = loaded from model)", params.n_ctx),
         [](common_params & params, int value) {
             params.n_ctx = value;
-            params.omni_runtime_profile.n_ctx_explicit = true;
+            params.omni_config.n_ctx_explicit = true;
             if (value == 0) {
                 // disable context reduction in llama_params_fit if the user explicitly requests the full context size:
                 params.fit_params_min_ctx = UINT32_MAX;
@@ -2400,7 +2397,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             } else {
                 params.n_gpu_layers = std::stoi(value);
             }
-            params.omni_runtime_profile.n_gpu_layers_explicit = true;
+            params.omni_config.n_gpu_layers_explicit = true;
             if (!llama_supports_gpu_offload()) {
                 fprintf(stderr, "warning: no usable GPU found, --gpu-layers option will be ignored\n");
                 fprintf(stderr, "warning: one possible reason is that llama.cpp was compiled without GPU support\n");
@@ -2643,7 +2640,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             : "model path to load",
         [](common_params & params, const std::string & value) {
             params.model.path = value;
-            params.omni_runtime_profile.model_explicit = true;
+            params.omni_config.model_explicit = true;
         }
     ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_EXPORT_LORA}).set_env("LLAMA_ARG_MODEL"));
     add_opt(common_arg(

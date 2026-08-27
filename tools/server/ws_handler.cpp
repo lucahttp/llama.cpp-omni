@@ -14,8 +14,6 @@
 #include "session.h"
 #include "protocol.h"
 #include "omni.h"
-#include "runtime-profile.h"
-#include "runtime-profile-session.h"
 #include "common.h"
 #include "llama.h"
 #include "log.h"
@@ -523,18 +521,23 @@ static omni_context * create_session_octx(common_params & params, const ParsedSe
                                           llama_model * model, llama_context * ctx,
                                           omni_context *& shared_octx,
                                           const std::string & output_dir,
-                                          const omni::effective_runtime_config * runtime_config) {
+                                          const omni::config * config) {
     int media_type = 2; // omni
     bool use_tts = init.use_tts;
-    const auto session_options = omni::resolve_runtime_session_options(
-            runtime_config, init.mode == "full_duplex", /*requested_tts_gpu_layers=*/99,
-            /*requested_token2wav_device=*/"gpu:0", params.omni_runtime_profile.token2wav_threads);
+    const auto session_options = omni::resolve_session_options(
+            config, init.mode == "full_duplex", /*requested_tts_gpu_layers=*/99,
+            /*requested_token2wav_device=*/"gpu:0", params.omni_config.token2wav_threads);
     const bool duplex_mode = session_options.duplex_mode;
 
     // Build params for omni_init
     auto & p = params;
     p.n_predict = 2048;
-    ensure_omni_model_paths(p);
+    if (config == nullptr) {
+        ensure_omni_model_paths(p);
+    }
+    if (use_tts && p.tts_model.empty()) {
+        use_tts = false;
+    }
 
     // Reuse the server-owned context if it matches this session's mode (avoids
     // reloading the model); otherwise tear it down and build a fresh one.
@@ -556,8 +559,8 @@ static omni_context * create_session_octx(common_params & params, const ParsedSe
     const int token2wav_threads = session_options.token2wav_threads;
     omni_context * octx = omni_init(&p, media_type, use_tts, p.tts_bin_dir, tts_gpu_layers,
                                      token2wav_device, duplex_mode,
-                                     model, ctx, output_dir, runtime_config,
-                                     session_options.strict_runtime_config, token2wav_threads);
+                                     model, ctx, output_dir, config,
+                                     session_options.config_locked, token2wav_threads);
     if (!octx) {
         LOG_ERR("create_session_octx: omni_init failed\n");
         return nullptr;
@@ -589,7 +592,7 @@ void handle_ws_backend(httplib::ws::WebSocket & ws,
                         llama_context * ctx,
                         omni_context *& shared_octx,
                         std::mutex & octx_mutex,
-                        const omni::effective_runtime_config * runtime_config) {
+                        const omni::config * config) {
     const std::string temp_dir = (fs::temp_directory_path() / "omni_ws").string();
     fs::create_directories(temp_dir);
     int msg_counter = 0;
@@ -641,6 +644,14 @@ void handle_ws_backend(httplib::ws::WebSocket & ws,
         return;
     }
 
+    const bool requested_duplex = parsed_init.mode == "full_duplex";
+    if (!omni::config_accepts_session_mode(config, requested_duplex)) {
+        LOG_ERR("WS /backend: session.init mode=%s rejected by config duplex=%d\n",
+                parsed_init.mode.c_str(), config->duplex_mode);
+        ws.close();
+        return;
+    }
+
     // ================================================================
     // Step 2: Allocate & activate session, create omni_context
     // ================================================================
@@ -658,7 +669,7 @@ void handle_ws_backend(httplib::ws::WebSocket & ws,
     {
         std::lock_guard<std::mutex> lock(octx_mutex);
         octx = create_session_octx(
-                params_base, parsed_init, model, ctx, shared_octx, session_output_dir, runtime_config);
+                params_base, parsed_init, model, ctx, shared_octx, session_output_dir, config);
     }
     if (!octx) {
         fail_fast(session_id, "omni_init_failed");

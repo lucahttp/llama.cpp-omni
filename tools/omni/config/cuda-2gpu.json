@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "llm": {
+    "model": "MiniCPM-o-4_5-Q4_K_M.gguf",
+    "quantization": "Q4_K_M",
+    "device": "primary",
+    "n_gpu_layers": -2
+  },
+  "vision": {
+    "model": "vision/MiniCPM-o-4_5-vision-F16.gguf",
+    "device": "secondary"
+  },
+  "audio": {
+    "model": "audio/MiniCPM-o-4_5-audio-F16.gguf",
+    "device": "secondary"
+  },
+  "tts": {
+    "model": "tts/MiniCPM-o-4_5-tts-F16.gguf",
+    "device": "primary",
+    "gpu_layers": -1
+  },
+  "projector": {
+    "model": "tts/MiniCPM-o-4_5-projector-F16.gguf",
+    "device": "secondary"
+  },
+  "token2wav": {
+    "model_dir": "token2wav-gguf",
+    "device": "primary",
+    "threads": 8
+  },
+  "n_ctx": 8192,
+  "duplex": true,
+  "async": true,
+  "vpm_batch_encode": false
+}

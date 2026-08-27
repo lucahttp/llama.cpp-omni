@@ -60,13 +60,13 @@ target_include_directories(${TARGET_OMNI} PRIVATE ${CMAKE_SOURCE_DIR}/vendor)
 
 if (LLAMA_BUILD_TESTS)
     add_test(
-        NAME test-omni-server-runtime-profile
+        NAME test-omni-server-config
         COMMAND ${CMAKE_COMMAND}
             -DOMNI_SERVER=$<TARGET_FILE:${TARGET_OMNI}>
-            -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/runtime-profile-smoke-models
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/test-runtime-profile-server.cmake
+            -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/omni-config-smoke-models
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/test-omni-config-server.cmake
     )
-    set_tests_properties(test-omni-server-runtime-profile PROPERTIES LABELS "main;omni")
+    set_tests_properties(test-omni-server-config PROPERTIES LABELS "main;omni")
 endif()
 
 # llama-tts-server executable (standalone VoxCPM2 TTS HTTP API)

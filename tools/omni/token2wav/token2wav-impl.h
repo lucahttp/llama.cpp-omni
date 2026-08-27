@@ -2034,8 +2034,8 @@ struct voc_hg2_runner {
 namespace omni {
 namespace flow {
 
-// Profile serving must fail closed when a requested device cannot be initialized.
-bool token2wav_device_fallback_allowed(bool strict_runtime_config);
+// Config serving must fail closed when a requested device cannot be initialized.
+bool token2wav_device_fallback_allowed(bool config_locked);
 
 class Token2Mel {
   public:

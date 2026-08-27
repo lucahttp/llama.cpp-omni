@@ -8707,8 +8707,8 @@ bool t2m_load_prompt_cache_gguf(const std::string &               gguf_path,
 
 }  // namespace
 
-bool token2wav_device_fallback_allowed(bool strict_runtime_config) {
-    return !strict_runtime_config;
+bool token2wav_device_fallback_allowed(bool config_locked) {
+    return !config_locked;
 }
 
 Token2Mel::~Token2Mel() {

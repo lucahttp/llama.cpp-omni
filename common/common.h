@@ -392,16 +392,20 @@ struct common_params_diffusion {
     bool    add_gumbel_noise = false; // add gumbel noise to the logits if temp > 0.0
 };
 
-struct common_params_omni_runtime_profile {
-    std::string profile;
+struct common_params_omni_config {
+    std::string path;
     std::string model_dir;
-    std::string profile_config;
     int32_t token2wav_threads = 8;
     bool print_effective_config = false;
     bool model_explicit = false;
     bool n_gpu_layers_explicit = false;
     bool n_ctx_explicit = false;
     bool token2wav_threads_explicit = false;
+    bool vision_explicit = false;
+    bool audio_explicit = false;
+    bool tts_explicit = false;
+    bool projector_explicit = false;
+    bool vpm_batch_encode_explicit = false;
 };
 
 // reasoning API response format (not to be confused as chat template's reasoning format)
@@ -487,7 +491,7 @@ struct common_params {
     struct common_params_speculative speculative;
     struct common_params_vocoder     vocoder;
     struct common_params_diffusion   diffusion;
-    struct common_params_omni_runtime_profile omni_runtime_profile;
+    struct common_params_omni_config omni_config;
 
     struct common_params_model model;
 

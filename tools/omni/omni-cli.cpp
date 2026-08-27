@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
@@ -47,22 +48,29 @@ static volatile bool g_is_interrupted = false;
 static void show_usage(const char * prog_name) {
     printf(
         "MiniCPM-o Omni CLI - Multimodal inference tool\n\n"
-        "Usage: %s -m <llm_model_path> [options]\n\n"
-        "Required:\n"
-        "  -m <path>           Path to LLM GGUF model (e.g., MiniCPM-o-4_5-Q4_K_M.gguf)\n"
-        "                      Other model paths will be auto-detected from directory structure:\n"
+        "Usage: %s [options]\n\n"
+        "Config:\n"
+        "  --config [NAME|PATH]  JSON defaults from tools/omni/config/, the install prefix,\n"
+        "                        or config/ next to the binary. Omit NAME or pass auto to pick\n"
+        "                        metal/cuda/cuda-2gpu/cpu. Other accelerators need --config cpu\n"
+        "                        or a JSON path. Explicit flags override JSON values.\n"
+        "                        Optional modules with missing files are skipped.\n"
+        "  --model-dir <dir>     Model tree used to resolve relative paths in --config\n"
+        "  --print-effective-config  Print the loaded config and exit\n\n"
+        "Model:\n"
+        "  -m <path>           LLM GGUF path. Required without --config; overrides JSON llm.model\n"
+        "                      Without --config, other models are inferred from the LLM directory:\n"
         "                        {dir}/vision/MiniCPM-o-4_5-vision-F16.gguf\n"
         "                        {dir}/audio/MiniCPM-o-4_5-audio-F16.gguf\n"
         "                        {dir}/tts/MiniCPM-o-4_5-tts-F16.gguf\n"
-        "                        {dir}/tts/MiniCPM-o-4_5-projector-F16.gguf\n\n"
-        "Options:\n"
+        "                        {dir}/tts/MiniCPM-o-4_5-projector-F16.gguf\n"
         "  --vision <path>     Override vision model path\n"
         "  --audio <path>      Override audio model path\n"
         "  --tts <path>        Override TTS model path\n"
         "  --projector <path>  Override projector model path\n"
         "  --ref-audio <path>  Reference audio for voice cloning (default: tools/omni/assets/default_ref_audio/default_ref_audio.wav)\n"
-        "  -c, --ctx-size <n>  Context size (default: 4096)\n"
-        "  -ngl <n>            Number of GPU layers (default: 99)\n"
+        "  -c, --ctx-size <n>  Context size (overrides JSON n_ctx)\n"
+        "  -ngl <n>            Number of GPU layers (overrides JSON n_gpu_layers)\n"
         "  --no-tts            Disable TTS output\n"
         "  --omni              Enable omni mode (audio + vision, media_type=2)\n"
         "  --vision-backend <mode>  Vision compute backend: 'metal' (default) or 'coreml' (ANE)\n"
@@ -75,10 +83,12 @@ static void show_usage(const char * prog_name) {
         "  --bench-vision <img> Benchmark serial vs batched vision encoding\n"
         "  -h, --help          Show this help message\n\n"
         "Example:\n"
+        "  %s --config --model-dir ./models/MiniCPM-o-4_5-gguf\n"
+        "  %s --config cuda --model-dir ./models/MiniCPM-o-4_5-gguf -ngl 20\n"
         "  %s -m ./models/MiniCPM-o-4_5-gguf/MiniCPM-o-4_5-Q4_K_M.gguf\n"
         "  %s -m ./models/MiniCPM-o-4_5-gguf/MiniCPM-o-4_5-F16.gguf --no-tts\n"
         "  %s -m ./models/MiniCPM-o-4_5-gguf/MiniCPM-o-4_5-Q4_K_M.gguf --omni --test tools/omni/assets/test_case/omni_test_case/omni_test_case_ 9\n",
-        prog_name, prog_name, prog_name, prog_name
+        prog_name, prog_name, prog_name, prog_name, prog_name, prog_name
     );
 }
 
@@ -216,12 +226,17 @@ int main(int argc, char ** argv) {
     std::string token2wav_coreml_model_path; // CoreML model path for token2wav DiT (empty = GPU only)
     std::string ref_audio_path = "tools/omni/assets/default_ref_audio/default_ref_audio.wav";
     std::string bench_vision_image;
+    std::string config_name;
+    std::string model_dir;
     int n_ctx = 4096;
     int n_gpu_layers = 99;  // GPU 层数，默认 99
     int media_type = 1;     // 1=audio only, 2=omni (audio+vision)
     bool use_tts = true;
     bool run_test = false;
     bool vision_batch_encode = false;  // 多 slice 批量编码优化（默认关闭）
+    bool n_ctx_explicit = false;
+    bool n_gpu_layers_explicit = false;
+    bool print_effective_config = false;
     std::string test_audio_prefix;
     int test_count = 0;
     
@@ -232,6 +247,19 @@ int main(int argc, char ** argv) {
         if (arg == "-h" || arg == "--help") {
             show_usage(argv[0]);
             return 0;
+        }
+        else if (arg == "--config") {
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                config_name = argv[++i];
+            } else {
+                config_name = "auto";
+            }
+        }
+        else if (arg == "--model-dir" && i + 1 < argc) {
+            model_dir = argv[++i];
+        }
+        else if (arg == "--print-effective-config") {
+            print_effective_config = true;
         }
         else if (arg == "-m" && i + 1 < argc) {
             llm_path = argv[++i];
@@ -253,9 +281,11 @@ int main(int argc, char ** argv) {
         }
         else if ((arg == "-c" || arg == "--ctx-size") && i + 1 < argc) {
             n_ctx = std::atoi(argv[++i]);
+            n_ctx_explicit = true;
         }
         else if (arg == "-ngl" && i + 1 < argc) {
             n_gpu_layers = std::atoi(argv[++i]);
+            n_gpu_layers_explicit = true;
         }
         else if (arg == "--no-tts") {
             use_tts = false;
@@ -320,14 +350,76 @@ int main(int argc, char ** argv) {
     }
 
     // 检查必需参数
-    if (llm_path.empty()) {
-        fprintf(stderr, "Error: -m <llm_model_path> is required\n\n");
+    if (config_name.empty() && llm_path.empty()) {
+        fprintf(stderr, "Error: -m <llm_model_path> or --config is required\n\n");
         show_usage(argv[0]);
         return 1;
     }
-    
-    // 解析模型路径
-    OmniModelPaths paths = resolve_model_paths(llm_path);
+    if (!config_name.empty() && llm_path.empty() && model_dir.empty()) {
+        fprintf(stderr, "Error: --config requires --model-dir or -m to resolve relative model paths\n\n");
+        show_usage(argv[0]);
+        return 1;
+    }
+
+    common_params params;
+    std::optional<omni::config> loaded_config;
+    OmniModelPaths paths;
+    if (!config_name.empty()) {
+        params.omni_config.path = config_name;
+        params.omni_config.model_dir = model_dir;
+        params.omni_config.print_effective_config = print_effective_config;
+        if (!llm_path.empty()) {
+            params.model.path = llm_path;
+            params.omni_config.model_explicit = true;
+        }
+        if (!vision_path_override.empty()) {
+            params.vpm_model = vision_path_override;
+            params.omni_config.vision_explicit = true;
+        }
+        if (!audio_path_override.empty()) {
+            params.apm_model = audio_path_override;
+            params.omni_config.audio_explicit = true;
+        }
+        if (!tts_path_override.empty()) {
+            params.tts_model = tts_path_override;
+            params.omni_config.tts_explicit = true;
+        }
+        if (!projector_path_override.empty()) {
+            params.projector_model = projector_path_override;
+            params.omni_config.projector_explicit = true;
+        }
+        if (n_gpu_layers_explicit) {
+            params.n_gpu_layers = n_gpu_layers;
+            params.omni_config.n_gpu_layers_explicit = true;
+        }
+        if (n_ctx_explicit) {
+            params.n_ctx = n_ctx;
+            params.omni_config.n_ctx_explicit = true;
+        }
+        if (vision_batch_encode) {
+            params.vpm_batch_encode = true;
+            params.omni_config.vpm_batch_encode_explicit = true;
+        }
+        std::string config_error;
+        if (!omni::prepare_config(params, loaded_config, config_error)) {
+            fprintf(stderr, "Error: failed to load Omni config: %s\n", config_error.c_str());
+            return 1;
+        }
+        if (print_effective_config && loaded_config) {
+            fputs(omni::format_config(*loaded_config).c_str(), stdout);
+            fflush(stdout);
+            return 0;
+        }
+        paths.llm = params.model.path;
+        paths.vision = params.vpm_model;
+        paths.audio = params.apm_model;
+        paths.tts = params.tts_model;
+        paths.projector = params.projector_model;
+        paths.base_dir = model_dir.empty() ? get_parent_dir(paths.llm) : model_dir;
+        paths.vision_coreml = paths.base_dir + "/vision/coreml_minicpmo45_vit_all_f16.mlmodelc";
+    } else {
+        paths = resolve_model_paths(llm_path);
+    }
     
     // 应用覆盖路径
     if (!vision_path_override.empty()) paths.vision = vision_path_override;
@@ -343,21 +435,23 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "Error: LLM model not found: %s\n", paths.llm.c_str());
         return 1;
     }
-    if (!file_exists(paths.audio)) {
-        fprintf(stderr, "Error: Audio model not found: %s\n", paths.audio.c_str());
+    if (paths.audio.empty() || !file_exists(paths.audio)) {
+        fprintf(stderr, "Error: Audio model not found: %s\n",
+                paths.audio.empty() ? "(not configured)" : paths.audio.c_str());
         return 1;
     }
-    if (use_tts && !file_exists(paths.tts)) {
-        fprintf(stderr, "Warning: TTS model not found: %s, disabling TTS\n", paths.tts.c_str());
+    if (use_tts && (paths.tts.empty() || !file_exists(paths.tts))) {
+        fprintf(stderr, "Warning: TTS model not found: %s, disabling TTS\n",
+                paths.tts.empty() ? "(not configured)" : paths.tts.c_str());
         use_tts = false;
     }
     
     // 设置参数
-    common_params params;
     params.model.path = paths.llm;
     params.vpm_model = paths.vision;
     params.apm_model = paths.audio;
     params.tts_model = paths.tts;
+    params.projector_model = paths.projector;
     // 只有显式选择 coreml 后端时才设置 CoreML 模型路径
     if (vision_backend == "coreml") {
         if (vision_coreml_model_path.empty()) {
@@ -366,9 +460,13 @@ int main(int argc, char ** argv) {
         params.vision_coreml_model_path = vision_coreml_model_path;
     }
     params.token2wav_coreml_model_path = token2wav_coreml_model_path;
-    params.vpm_batch_encode = vision_batch_encode;
-    params.n_ctx = n_ctx;
-    params.n_gpu_layers = n_gpu_layers;
+    params.vpm_batch_encode = vision_batch_encode || params.vpm_batch_encode;
+    if (n_ctx_explicit || loaded_config == std::nullopt) {
+        params.n_ctx = n_ctx;
+    }
+    if (n_gpu_layers_explicit || loaded_config == std::nullopt) {
+        params.n_gpu_layers = n_gpu_layers;
+    }
     
     // Projector 路径需要通过 tts_bin_dir 传递
     // omni.cpp 中 projector 路径计算: gguf_root_dir + "/projector.gguf"
@@ -383,8 +481,8 @@ int main(int argc, char ** argv) {
     printf("=== Initializing Omni Context ===\n");
     printf("  Media type: %d (%s)\n", media_type, media_type == 2 ? "omni: audio+vision" : "audio only");
     printf("  TTS enabled: %s\n", use_tts ? "yes" : "no");
-    printf("  Context size: %d\n", n_ctx);
-    printf("  GPU layers: %d\n", n_gpu_layers);
+    printf("  Context size: %d\n", params.n_ctx);
+    printf("  GPU layers: %d\n", params.n_gpu_layers);
     printf("  Vision backend: %s\n", vision_backend.c_str());
     printf("  Vision batch encode: %s\n", vision_batch_encode ? "enabled" : "disabled");
     if (vision_backend == "coreml") {
@@ -397,7 +495,13 @@ int main(int argc, char ** argv) {
     }
     
     // 🔧 Token2Wav 使用 GPU（Metal），已用 ggml_add+ggml_repeat 替代不支持的 ggml_add1
-    auto ctx_omni = omni_init(&params, media_type, use_tts, tts_bin_dir, -1, "gpu:0");
+    const int tts_gpu_layers = loaded_config ? loaded_config->tts_gpu_layers : -1;
+    const std::string token2wav_device = loaded_config ? loaded_config->token2wav_device : "gpu:0";
+    const int token2wav_threads = loaded_config ? loaded_config->token2wav_threads : 8;
+    auto ctx_omni = omni_init(&params, media_type, use_tts, tts_bin_dir, tts_gpu_layers, token2wav_device,
+                              /*duplex_mode=*/false, nullptr, nullptr, "./tools/omni/output",
+                              loaded_config ? &*loaded_config : nullptr, loaded_config.has_value(),
+                              token2wav_threads);
     if (ctx_omni == nullptr) {
         fprintf(stderr, "Error: Failed to initialize omni context\n");
         return 1;

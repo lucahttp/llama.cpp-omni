@@ -2,7 +2,6 @@
 #include "vision.h"
 #include "audition.h"
 #include "omni.h"
-#include "runtime-profile.h"
 #include "token2wav/token2wav-impl.h"
 
 #include "llama.h"
@@ -3979,7 +3978,7 @@ void print_with_timestamp(const char* format, ...)
     va_end(args);
 }
 
-static std::string omni_runtime_module_device(const omni::effective_runtime_config * config,
+static std::string omni_config_module_device(const omni::config * config,
                                               const std::string & module) {
     if (config == nullptr) {
         return {};
@@ -4064,8 +4063,8 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
                                 int tts_gpu_layers, const std::string & token2wav_device, bool duplex_mode,
                                 llama_model * existing_model, llama_context * existing_ctx,
                                 const std::string & base_output_dir,
-                                const omni::effective_runtime_config * runtime_config,
-                                bool strict_runtime_config,
+                                const omni::config * config,
+                                bool config_locked,
                                 int token2wav_threads) {
     // process the prompt
     print_with_timestamp("=== omni_init start\n");
@@ -4080,9 +4079,9 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
     ctx_omni->media_type = media_type;
     ctx_omni->use_tts = use_tts;
     ctx_omni->duplex_mode = duplex_mode;
-    ctx_omni->strict_runtime_config = strict_runtime_config;
-    if (runtime_config != nullptr) {
-        token2wav_threads = runtime_config->token2wav_threads;
+    ctx_omni->config_locked = config_locked;
+    if (config != nullptr) {
+        token2wav_threads = config->token2wav_threads;
     }
     if (token2wav_threads <= 0) {
         LOG_ERR("%s: token2wav_threads must be positive\n", __func__);
@@ -4194,7 +4193,7 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
         // 使用TTS专用的模型加载函数，支持独立的GPU层数设置
         // tts_gpu_layers 从 omni_init 参数传入，-1 表示使用与LLM相同的设置
         print_with_timestamp("TTS model: loading with n_gpu_layers=%d\n", tts_gpu_layers);
-        const std::string tts_device = omni_runtime_module_device(runtime_config, "tts");
+        const std::string tts_device = omni_config_module_device(config, "tts");
         llama_model * tts_model = llama_init_tts(params, params->tts_model, tts_gpu_layers, tts_device);
         if (tts_model == NULL) {
             LOG_ERR("%s: error: failed to init TTS model from %s\n", __func__, params->tts_model.c_str());
@@ -4258,19 +4257,19 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
         }
         print_with_timestamp("TTS: weights loaded successfully\n");
         
-        // Load Projector Semantic from the profile-provided path when available.
+        // Load Projector Semantic from the config-provided path when available.
         std::string projector_path = params->projector_model.empty()
                                           ? tts_bin_dir + "/MiniCPM-o-4_5-projector-F16.gguf"
                                           : params->projector_model;
         print_with_timestamp("Projector: loading from %s\n", projector_path.c_str());
-        const std::string projector_device = omni_runtime_module_device(runtime_config, "projector");
+        const std::string projector_device = omni_config_module_device(config, "projector");
         if (projector_init(ctx_omni->projector, projector_path,
                            projector_device.empty() ? std::string() : projector_device)) {
             print_with_timestamp("Projector: loaded successfully\n");
         } else {
             print_with_timestamp("Projector: failed to load, will use fallback implementation\n");
-            if (ctx_omni->strict_runtime_config) {
-                LOG_ERR("%s: strict runtime config requires the requested Projector backend\n", __func__);
+            if (ctx_omni->config_locked) {
+                LOG_ERR("%s: config requires the requested Projector backend\n", __func__);
                 projector_free(ctx_omni->projector);
                 omni_free(ctx_omni);
                 return NULL;
@@ -4294,7 +4293,7 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
         delete ctx_omni;
         return NULL;
     }
-    const std::string audio_device = omni_runtime_module_device(runtime_config, "audio");
+    const std::string audio_device = omni_config_module_device(config, "audio");
     ctx_omni->ctx_audio = audition_init(
         params->apm_model.c_str(),
         audition_context_params{audio_device != "cpu", GGML_LOG_LEVEL_INFO,
@@ -4320,15 +4319,15 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
     if (media_type == 2) {
         LOG_INF("init vision....");
         const char * vision_path = ctx_omni->params->vpm_model.c_str();
-        const std::string vision_device = omni_runtime_module_device(runtime_config, "vision");
+        const std::string vision_device = omni_config_module_device(config, "vision");
         auto * ctx_vision = vision_init(
             vision_path,
             vision_context_params{vision_device != "cpu", GGML_LOG_LEVEL_INFO, nullptr,
                                   vision_device.empty() || vision_device == "cpu" ? nullptr : vision_device.c_str()});
         ctx_omni->ctx_vision = ctx_vision;
 
-        if (ctx_vision == nullptr && ctx_omni->strict_runtime_config) {
-            LOG_ERR("%s: strict runtime config requires the requested Vision backend\n", __func__);
+        if (ctx_vision == nullptr && ctx_omni->config_locked) {
+            LOG_ERR("%s: config requires the requested Vision backend\n", __func__);
             omni_free(ctx_omni);
             return NULL;
         }
@@ -4373,8 +4372,8 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
         // Check if token2wav model files exist
         // 优先检查 HF 模型目录下的 token2wav-gguf (tts_bin_dir 的父目录)
         // 目录结构: {model_dir}/token2wav-gguf/
-        if (runtime_config != nullptr && !runtime_config->token2wav_model_dir.empty()) {
-            ctx_omni->token2wav_model_dir = runtime_config->token2wav_model_dir;
+        if (config != nullptr && !config->token2wav_model_dir.empty()) {
+            ctx_omni->token2wav_model_dir = config->token2wav_model_dir;
         } else {
             std::string gguf_root_dir = tts_bin_dir;
             size_t last_slash = gguf_root_dir.find_last_of("/\\");
@@ -4429,16 +4428,16 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
             if (voc_dev_env) {
                 device_vocoder = voc_dev_env;
                 print_with_timestamp("Token2Wav: vocoder device overridden by OMNI_VOC_DEVICE=%s\n", voc_dev_env);
-                if (ctx_omni->strict_runtime_config && device_vocoder != token2wav_device) {
-                    LOG_ERR("%s: strict runtime config rejects OMNI_VOC_DEVICE=%s because Token2Wav placement is %s\n",
+                if (ctx_omni->config_locked && device_vocoder != token2wav_device) {
+                    LOG_ERR("%s: config rejects OMNI_VOC_DEVICE=%s because Token2Wav placement is %s\n",
                             __func__, voc_dev_env, token2wav_device.c_str());
                     omni_free(ctx_omni);
                     return NULL;
                 }
             } else {
-                if (ctx_omni->strict_runtime_config) {
+                if (ctx_omni->config_locked) {
                     device_vocoder = token2wav_device;
-                    print_with_timestamp("Token2Wav: profile requires vocoder on %s\n", device_vocoder.c_str());
+                    print_with_timestamp("Token2Wav: config requires vocoder on %s\n", device_vocoder.c_str());
                 } else {
 #ifdef GGML_USE_CUDA
                     device_vocoder = token2wav_device;
@@ -4501,16 +4500,16 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
                     encoder_gguf, flow_matching_gguf, flow_extra_gguf, prompt_cache_gguf,
                     vocoder_gguf, device_token2mel, device_vocoder, 5, 1.0f, coreml_model_path,
                     token2wav_threads,
-                    omni::flow::token2wav_device_fallback_allowed(ctx_omni->strict_runtime_config));
+                    omni::flow::token2wav_device_fallback_allowed(ctx_omni->config_locked));
             if (!init_ok && use_prompt_bundle) {
                 print_with_timestamp("Token2Wav: prompt_cache failed, fallback to prompt_bundle from %s\n", prompt_bundle_dir.c_str());
                 init_ok = ctx_omni->token2wav_session->init_from_prompt_bundle(
                         encoder_gguf, flow_matching_gguf, flow_extra_gguf, prompt_bundle_dir,
                         vocoder_gguf, device_token2mel, device_vocoder, 5, 1.0f, "", token2wav_threads,
-                        omni::flow::token2wav_device_fallback_allowed(ctx_omni->strict_runtime_config));
+                        omni::flow::token2wav_device_fallback_allowed(ctx_omni->config_locked));
             }
             // Fallback to CPU
-            if (!init_ok && omni::flow::token2wav_device_fallback_allowed(ctx_omni->strict_runtime_config)) {
+            if (!init_ok && omni::flow::token2wav_device_fallback_allowed(ctx_omni->config_locked)) {
                 print_with_timestamp("Token2Wav: GPU init failed, trying CPU mode...\n");
                 ctx_omni->token2wav_session.reset();
                 ctx_omni->token2wav_session = std::make_unique<omni::flow::Token2WavSession>();
@@ -4535,8 +4534,8 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
             print_with_timestamp("Token2Wav: model files not found in %s\n", ctx_omni->token2wav_model_dir.c_str());
         }
 
-        if (ctx_omni->strict_runtime_config && !ctx_omni->token2wav_initialized) {
-            LOG_ERR("%s: strict runtime config requires Token2Wav on the requested device\n", __func__);
+        if (ctx_omni->config_locked && !ctx_omni->token2wav_initialized) {
+            LOG_ERR("%s: config requires Token2Wav on the requested device\n", __func__);
             omni_free(ctx_omni);
             return NULL;
         }
@@ -4643,7 +4642,7 @@ struct omni_context * omni_init(struct common_params * params, int media_type, b
             print_with_timestamp("Token2Wav: 使用 C++ 实现\n");
         }
     }
-    ctx_omni->async = runtime_config != nullptr ? runtime_config->async_mode : true;
+    ctx_omni->async = config != nullptr ? config->async_mode : true;
     
     // ==================== 初始化特殊 Token ID ====================
     // 从 LLM 词表中查找并缓存特殊 token ID
@@ -10508,8 +10507,8 @@ bool stream_prefill(struct omni_context * ctx_omni, std::string aud_fname, std::
                 if (audio_embeds != nullptr) {
                     omni_embed_free(audio_embeds);
                 }
-                if (ctx_omni->strict_runtime_config) {
-                    LOG_ERR("%s: strict runtime config could not encode the reference audio\n", __func__);
+                if (ctx_omni->config_locked) {
+                    LOG_ERR("%s: config could not encode the reference audio\n", __func__);
                     return false;
                 }
             }

@@ -12,10 +12,8 @@ endif()
 add_library(omni
             omni.cpp
             omni.h
-            runtime-profile-session.cpp
-            runtime-profile-session.h
-            runtime-profile.cpp
-            runtime-profile.h
+            omni-config.cpp
+            omni-config.h
             tts-condition-graph.cpp
             tts-condition-graph.h
             audition.cpp
@@ -55,6 +53,10 @@ target_include_directories(omni PUBLIC  .)
 target_include_directories(omni PRIVATE ../..)
 target_include_directories(omni PRIVATE ../../vendor)
 target_compile_features   (omni PRIVATE cxx_std_17)
+include(GNUInstallDirs)
+target_compile_definitions(omni PRIVATE
+    OMNI_DEFAULT_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config"
+    OMNI_INSTALL_CONFIG_DIR="${CMAKE_INSTALL_FULL_DATADIR}/llama.cpp-omni/config")
 
 # Link CoreML and Accelerate frameworks when CoreML is enabled
 if(ENABLE_COREML)
@@ -89,6 +91,9 @@ set_target_properties(omni
     PUBLIC_HEADER "${OMNI_PUBLIC_HEADERS}")
 
 install(TARGETS omni LIBRARY PUBLIC_HEADER)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/config/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/llama.cpp-omni/config
+        FILES_MATCHING PATTERN "*.json")
 
 if (NOT MSVC)
     # for stb_image.h and miniaudio.h
@@ -205,12 +210,12 @@ endif()
 # voxcpm2-cli build + smoke test (no weights). --help exits non-zero by design,
 # so assert on the usage banner instead of the exit code.
 if (LLAMA_BUILD_TESTS)
-    set(TARGET_RUNTIME_PROFILE_TEST test-runtime-profile)
-    add_executable(${TARGET_RUNTIME_PROFILE_TEST} test/test-runtime-profile.cpp)
-    target_link_libraries(${TARGET_RUNTIME_PROFILE_TEST} PRIVATE omni)
-    target_compile_features(${TARGET_RUNTIME_PROFILE_TEST} PRIVATE cxx_std_17)
-    add_test(NAME ${TARGET_RUNTIME_PROFILE_TEST} COMMAND ${TARGET_RUNTIME_PROFILE_TEST})
-    set_tests_properties(${TARGET_RUNTIME_PROFILE_TEST} PROPERTIES LABELS "main;omni")
+    set(TARGET_OMNI_CONFIG_TEST test-omni-config)
+    add_executable(${TARGET_OMNI_CONFIG_TEST} test/test-omni-config.cpp)
+    target_link_libraries(${TARGET_OMNI_CONFIG_TEST} PRIVATE omni)
+    target_compile_features(${TARGET_OMNI_CONFIG_TEST} PRIVATE cxx_std_17)
+    add_test(NAME ${TARGET_OMNI_CONFIG_TEST} COMMAND ${TARGET_OMNI_CONFIG_TEST})
+    set_tests_properties(${TARGET_OMNI_CONFIG_TEST} PROPERTIES LABELS "main;omni")
 
     add_test(
         NAME voxcpm2-cli-smoke

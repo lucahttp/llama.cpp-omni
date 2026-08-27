@@ -143,44 +143,79 @@ cmake --build build --target llama-omni-server --target llama-omni-cli -j
 
 > CMake will auto-detect and enable Metal (macOS) or CUDA (Linux with NVIDIA GPU).
 
-### Runtime profile
+### Config
 
-`--profile auto` reads a static JSON profile. The default path is
-`<model-dir>/omni-runtime-profile.json`; `--profile-config PATH` selects a
-different file. The JSON file names every Omni module, its quantization, GGML
-backend device name, and runtime settings. The server does not select a model
-from available files and does not have a built-in CPU or accelerator fallback.
+`--config [NAME|PATH]` loads JSON defaults from `tools/omni/config/` (and from
+the install prefix or the directory next to the binary when those exist). JSON
+is the baseline; explicit CLI flags such as `--model`, `--n-gpu-layers`,
+`--ctx-size`, and `--token2wav-threads` override those values.
 
-The server exits before loading weights when the profile file is missing or
-invalid, a required field is absent, a configured model path does not exist, or
-a configured GGML backend device cannot be mapped to a visible accelerator. A
-complete example is in
-[`docs/examples/omni-runtime-profile-auto.md`](docs/examples/omni-runtime-profile-auto.md).
+`--config` with no name, or `--config auto`, inspects visible GGML devices and
+picks `metal`, `cuda-2gpu`, `cuda`, or `cpu`. Other accelerators (Vulkan, HIP,
+SYCL, and similar) have no bundled file: pass `--config cpu` or a JSON path.
+A bare name such as `cuda` loads `NAME.json` from the config search path. A
+path loads that file directly. Relative model paths are resolved from
+`--model-dir`, or from the LLM path's directory when `--model` is set.
+
+`llm` is required and its model file must exist. `vision`, `audio`, `tts`,
+`projector`, and `token2wav` are optional: omit the object, or leave the files
+missing, and that module is skipped. The process still exits before loading
+weights when the config file is missing or invalid, a required `llm` field is
+absent, or a device for an *active* module cannot be mapped.
 
 ```bash
 ./build/bin/llama-omni-server \
-    --profile auto \
+    --config \
     --model-dir /path/to/MiniCPM-o-4_5-gguf \
     --host 0.0.0.0 \
     --port 9060
 ```
 
-Inspect the selection without loading weights or opening the HTTP port:
+Same as `--config auto`. Pin a file instead of auto-select:
 
 ```bash
 ./build/bin/llama-omni-server \
-    --profile auto \
+    --config cuda \
+    --model-dir /path/to/MiniCPM-o-4_5-gguf \
+    --host 0.0.0.0 \
+    --port 9060
+```
+
+`llama-omni-cli` uses the same flags:
+
+```bash
+./build/bin/llama-omni-cli \
+    --config \
+    --model-dir /path/to/MiniCPM-o-4_5-gguf
+```
+
+Inspect the loaded file without loading weights or opening the HTTP port:
+
+```bash
+./build/bin/llama-omni-server \
+    --config auto \
     --model-dir /path/to/MiniCPM-o-4_5-gguf \
     --print-effective-config
 ```
 
-The resolver assigns LLM, Vision, Audio, TTS, Projector, and Token2Wav to the
-devices named in the JSON file. The example uses fixed `CUDA0` and `CUDA1`
-backend names for the first and second visible CUDA devices; `cpu` always means
-the CPU backend. The configured names must be present in the current process,
-otherwise profile validation fails. `primary` and `secondary` remain accepted
-as backward-compatible aliases. `CUDA_VISIBLE_DEVICES` (or the corresponding
-vendor visibility variable) limits which accelerators can be mapped.
+Bundled defaults:
+
+| `--config` | File | Notes |
+|---|---|---|
+| `auto` or omitted name | picked from hardware | Metal -> `metal`; 2+ CUDA GPUs -> `cuda-2gpu`; 1 CUDA GPU -> `cuda`; CPU-only -> `cpu`; other accelerators error |
+| `cuda` | `tools/omni/config/cuda.json` | one NVIDIA GPU, all modules on `primary` |
+| `cuda-2gpu` | `tools/omni/config/cuda-2gpu.json` | LLM/TTS/Token2Wav on `primary`, Vision/Audio/Projector on `secondary` |
+| `metal` | `tools/omni/config/metal.json` | one Apple GPU, all modules on `primary` |
+| `cpu` | `tools/omni/config/cpu.json` | all modules on CPU |
+
+The loader assigns LLM, Vision, Audio, TTS, Projector, and Token2Wav to the
+devices named in the JSON file. `cpu` always means the CPU backend. `primary`
+and `secondary` map to the first and second visible accelerators in GGML device
+order, not by free memory. Explicit names such as `CUDA0` or `Metal` are also
+accepted and must be visible to the current process. `CUDA_VISIBLE_DEVICES`
+(or the corresponding vendor visibility variable) limits which accelerators
+can be mapped. Copy a file from `tools/omni/config/` to start a machine-specific
+override, then pass that path to `--config`.
 
 The output contains one `placement=` line for each module. Each line names the
 model path, precision, GGML backend class, selected device, execution mode, and
@@ -203,6 +238,13 @@ server.
 ./build/bin/llama-omni-cli \
     -m /path/to/MiniCPM-o-4_5-gguf/MiniCPM-o-4_5-Q4_K_M.gguf
 
+# JSON defaults, auto-picked from hardware. CLI flags still win.
+./build/bin/llama-omni-cli \
+    --config --model-dir /path/to/MiniCPM-o-4_5-gguf
+
+./build/bin/llama-omni-cli \
+    --config cuda --model-dir /path/to/MiniCPM-o-4_5-gguf -ngl 20
+
 # With custom reference audio (voice cloning)
 ./build/bin/llama-omni-cli \
     -m /path/to/MiniCPM-o-4_5-gguf/MiniCPM-o-4_5-Q4_K_M.gguf \
@@ -218,14 +260,17 @@ server.
 
 | Option | Description |
 |--------|-------------|
-| `-m <path>` | **Required**. Path to LLM GGUF model |
+| `--config [NAME\|PATH]` | JSON defaults. Omit NAME or pass `auto` to pick from hardware |
+| `--model-dir <dir>` | Model tree for relative paths in `--config` |
+| `--print-effective-config` | Print the loaded config and exit |
+| `-m <path>` | LLM GGUF path. Required without `--config`; overrides JSON `llm.model` |
 | `--vision <path>` | Override vision model path |
 | `--audio <path>` | Override audio model path |
 | `--tts <path>` | Override TTS model path |
 | `--projector <path>` | Override projector model path |
 | `--ref-audio <path>` | Reference audio for voice cloning |
-| `-c, --ctx-size <n>` | Context size (default: 4096) |
-| `-ngl <n>` | Number of GPU layers (default: 99) |
+| `-c, --ctx-size <n>` | Context size (overrides JSON `n_ctx`) |
+| `-ngl <n>` | Number of GPU layers (overrides JSON `n_gpu_layers`) |
 | `--no-tts` | Disable TTS output |
 | `--vision-batch-encode` | Encode same-size image slices in one batched pass (off by default; see below) |
 | `--test <prefix> <n>` | Run test with audio files |
@@ -530,7 +575,7 @@ POST /v1/stream/omni_init
 | `voice_audio` | Reference WAV for voice cloning. Omit to use default voice |
 | `output_dir` | Directory where TTS WAV files will be written |
 
-When the server starts with `--profile`, the effective runtime configuration controls `duplex_mode`, `tts_gpu_layers`, and `token2wav_device`. Values for those fields in the `omni_init` request are ignored so a request cannot silently replace the static profile placement. Without `--profile`, the request fields keep their legacy behavior.
+When the server starts with `--config`, the loaded file controls `duplex_mode`, `tts_gpu_layers`, and `token2wav_device`. HTTP `omni_init` fields for those values are ignored. WebSocket `session.init` must send a `mode` that matches `duplex` (`full_duplex` or `turn_based`); a mismatch is rejected before `session.created`. Without `--config`, the request fields keep their legacy behavior.
 
 **Expected response:**
 ```json

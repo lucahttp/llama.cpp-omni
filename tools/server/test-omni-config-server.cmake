@@ -23,12 +23,11 @@ foreach(relative_path IN ITEMS
     file(WRITE "${TEST_ROOT}/${relative_path}" "test")
 endforeach()
 
-# Keep this smoke fixture backend-portable; primary resolves to the first
-# visible accelerator on CUDA, Metal, and other GGML backends.
-file(WRITE "${TEST_ROOT}/omni-runtime-profile.json" [=[
+# Keep this smoke fixture backend-portable. primary is the first visible
+# accelerator in GGML device order (CUDA, Metal, and others).
+file(WRITE "${TEST_ROOT}/omni-config.json" [=[
 {
   "schema_version": 1,
-  "profile": "auto",
   "llm": {
     "model": "MiniCPM-o-4_5-F16.gguf",
     "quantization": "F16",
@@ -57,18 +56,16 @@ file(WRITE "${TEST_ROOT}/omni-runtime-profile.json" [=[
     "device": "primary",
     "threads": 8
   },
-  "runtime": {
-    "n_ctx": 8192,
-    "duplex": true,
-    "async": true,
-    "vpm_batch_encode": true
-  }
+  "n_ctx": 8192,
+  "duplex": true,
+  "async": true,
+  "vpm_batch_encode": true
 }
 ]=])
 
 execute_process(
     COMMAND "${OMNI_SERVER}"
-        --profile auto
+        --config "${TEST_ROOT}/omni-config.json"
         --model-dir "${TEST_ROOT}"
         --print-effective-config
     RESULT_VARIABLE result
@@ -78,14 +75,11 @@ execute_process(
 )
 
 if(NOT result EQUAL 0)
-    message(FATAL_ERROR "llama-omni-server profile resolution failed (${result})\nstdout:\n${stdout}\nstderr:\n${stderr}")
+    message(FATAL_ERROR "llama-omni-server config load failed (${result})\nstdout:\n${stdout}\nstderr:\n${stderr}")
 endif()
 
-if(NOT stdout MATCHES "profile=auto")
-    message(FATAL_ERROR "effective config did not contain profile=auto\nstdout:\n${stdout}")
-endif()
-if(NOT stdout MATCHES "resolved_profile=static_config")
-    message(FATAL_ERROR "effective config did not identify the static profile config\nstdout:\n${stdout}")
+if(NOT stdout MATCHES "config_path=")
+    message(FATAL_ERROR "effective config did not contain config_path=\nstdout:\n${stdout}")
 endif()
 if(NOT stdout MATCHES "token2wav_model_dir=${TEST_ROOT}/token2wav-gguf")
     message(FATAL_ERROR "effective config did not contain the Token2Wav model directory\nstdout:\n${stdout}")
@@ -100,10 +94,10 @@ if(NOT stdout MATCHES "placement=token2wav,")
     message(FATAL_ERROR "effective config did not contain the Token2Wav placement\nstdout:\n${stdout}")
 endif()
 
-file(REMOVE "${TEST_ROOT}/omni-runtime-profile.json")
+file(REMOVE "${TEST_ROOT}/omni-config.json")
 execute_process(
     COMMAND "${OMNI_SERVER}"
-        --profile auto
+        --config "${TEST_ROOT}/omni-config.json"
         --model-dir "${TEST_ROOT}"
         --print-effective-config
     RESULT_VARIABLE missing_config_result
@@ -112,15 +106,53 @@ execute_process(
     TIMEOUT 20
 )
 if(missing_config_result EQUAL 0)
-    message(FATAL_ERROR "missing profile config was accepted\nstdout:\n${missing_config_stdout}\nstderr:\n${missing_config_stderr}")
+    message(FATAL_ERROR "missing config file was accepted\nstdout:\n${missing_config_stdout}\nstderr:\n${missing_config_stderr}")
 endif()
-if(NOT missing_config_stderr MATCHES "profile config file")
-    message(FATAL_ERROR "missing profile config error was not actionable\nstderr:\n${missing_config_stderr}")
+if(NOT missing_config_stderr MATCHES "config file")
+    message(FATAL_ERROR "missing config file error was not actionable\nstderr:\n${missing_config_stderr}")
 endif()
+
+file(WRITE "${TEST_ROOT}/omni-config.json" [=[
+{
+  "schema_version": 1,
+  "llm": {
+    "model": "MiniCPM-o-4_5-F16.gguf",
+    "quantization": "F16",
+    "device": "primary",
+    "n_gpu_layers": -2
+  },
+  "vision": {
+    "model": "vision/MiniCPM-o-4_5-vision-F16.gguf",
+    "device": "primary"
+  },
+  "audio": {
+    "model": "audio/MiniCPM-o-4_5-audio-F16.gguf",
+    "device": "primary"
+  },
+  "tts": {
+    "model": "tts/MiniCPM-o-4_5-tts-F16.gguf",
+    "device": "primary",
+    "gpu_layers": -1
+  },
+  "projector": {
+    "model": "tts/MiniCPM-o-4_5-projector-F16.gguf",
+    "device": "primary"
+  },
+  "token2wav": {
+    "model_dir": "token2wav-gguf",
+    "device": "primary",
+    "threads": 8
+  },
+  "n_ctx": 8192,
+  "duplex": true,
+  "async": true,
+  "vpm_batch_encode": true
+}
+]=])
 
 execute_process(
     COMMAND "${OMNI_SERVER}"
-        --profile auto
+        --config "${TEST_ROOT}/omni-config.json"
         --model-dir "${TEST_ROOT}"
         --model "${TEST_ROOT}/missing-explicit-model.gguf"
         --print-effective-config
