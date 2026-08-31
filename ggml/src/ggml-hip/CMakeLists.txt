@@ -88,9 +88,10 @@ ggml_add_backend_library(ggml-hip
                         )
 
 if (WIN32)
+    file(TO_CMAKE_PATH "${ROCM_PATH}" ROCM_PATH_CMAKE)
     target_compile_options(ggml-hip PRIVATE
-        "--rocm-path=${ROCM_PATH}"
-        "--rocm-device-lib-path=${ROCM_PATH}/lib/llvm/amdgcn/bitcode"
+        "--rocm-path=${ROCM_PATH_CMAKE}"
+        "--rocm-device-lib-path=${ROCM_PATH_CMAKE}/lib/llvm/amdgcn/bitcode"
     )
 endif()
 

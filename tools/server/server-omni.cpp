@@ -109,7 +109,11 @@ struct omni_server_state {
 };
 
 int main(int argc, char ** argv) {
+<<<<<<< HEAD
 #if defined(_WIN32)
+=======
+#ifdef _WIN32
+>>>>>>> feat/rocm-hip-windows
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
@@ -393,6 +397,7 @@ int main(int argc, char ** argv) {
         res_ok(res, {{"success", true}});
     });
 
+<<<<<<< HEAD
     //
     // Delegation API
     //
@@ -690,6 +695,9 @@ int main(int argc, char ** argv) {
         }
     }
     llama_backend_free();
+#ifdef _WIN32
+    WSACleanup();
+#endif
 
     return 0;
 }

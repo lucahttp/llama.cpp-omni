@@ -145,8 +145,8 @@ cmake --build build --target llama-omni-server --target llama-omni-cli -j
 #### Windows Native with AMD ROCm / HIP (RX 6000 / 7000 / 8000)
 For complete instructions, refer to the [Windows ROCm Full Duplex Guide](docs/WINDOWS_ROCM_FULL_DUPLEX_GUIDE.md).
 ```powershell
-# Extract AMD ROCm SDK (e.g. https://repo.amd.com/rocm/tarball-multi-arch/therock-dist-windows-gfx103X-all-7.14.0.tar.gz)
-$env:ROCM_PATH = "C:\path\to\rocm-sdk" # e.g. gfx103X-7.14.0
+# Extract AMD ROCm SDK (e.g. https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx103X-all-10.0.0.tar.gz)
+$env:ROCM_PATH = "C:\path\to\rocm-sdk" # e.g. gfx103X-10.0.0
 $env:HIP_PATH  = "$env:ROCM_PATH"
 $env:PATH      = "$env:ROCM_PATH\bin;$env:ROCM_PATH\lib\llvm\bin;" + $env:PATH
 
