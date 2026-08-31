@@ -17,6 +17,8 @@ add_library(${TARGET} STATIC
     server-context.h
     server-tools.cpp
     server-tools.h
+    delegation-handler.cpp
+    delegation-handler.h
 )
 
 if (BUILD_SHARED_LIBS)
@@ -27,6 +29,7 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ../omni)
 target_include_directories(${TARGET} PRIVATE ../omni/voxcpm2)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
+target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/vendor/cpp-httplib)
 target_link_libraries(${TARGET} PRIVATE llama-common omni mtmd voxcpm2_runtime ${CMAKE_THREAD_LIBS_INIT})
 
 # llama-omni-server executable (standalone omni HTTP API)
@@ -48,7 +51,7 @@ add_executable(${TARGET_OMNI}
 )
 install(TARGETS ${TARGET_OMNI} RUNTIME)
 
-target_link_libraries(${TARGET_OMNI} PRIVATE omni llama-common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET_OMNI} PRIVATE omni llama-common cpp-httplib server-context ${CMAKE_THREAD_LIBS_INIT})
 if (LLAMA_OPENSSL AND OpenSSL_FOUND)
     target_link_libraries(${TARGET_OMNI} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(${TARGET_OMNI} PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)

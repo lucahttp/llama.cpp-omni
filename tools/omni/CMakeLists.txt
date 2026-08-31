@@ -24,6 +24,7 @@ add_library(omni
             token2wav/token2wav.cpp
             token2wav/token2wav.h
             token2wav/token2wav-profile.h
+            delegation.h
             )
 
 # Add CoreML related files when enabled

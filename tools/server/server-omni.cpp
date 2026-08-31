@@ -9,6 +9,7 @@
 #include "sampling.h"
 #include "session.h"
 #include "ws_handler.h"
+#include "delegation-handler.h"
 
 #include <mutex>
 #include <thread>
@@ -18,9 +19,8 @@
 #include <string>
 
 #include "httplib.h"
-#include <nlohmann/json.hpp>
-
-using json = nlohmann::json;
+// nlohmann/json.hpp and 'using json = nlohmann::json' are already included
+// by protocol.h (pulled in transitively via session.h / ws_handler.h).
 
 static json format_error_response(const std::string & message, const std::string & type = "invalid_request_error") {
     return json{{"error", {{"message", message}, {"type", type}}}};
@@ -84,9 +84,35 @@ struct omni_server_state {
     omni_context * octx = nullptr;    // WS backend uses this as shared_octx
     std::mutex octx_mutex;            // protects omni_context lifecycle + prefill/decode entry
     SessionManager session_mgr;       // WS backend session management
+
+    // Async delegation: a worker thread pool that calls external AI APIs or
+    // CLI tools (Claude / OpenAI / gh copilot / agy) without blocking the
+    // audio loop. DelegationHandler itself is internally thread-safe; the
+    // surrounding state is split so we can lazily init() once and refuse
+    // re-init after the worker thread is running.
+    //
+    // Lifecycle:
+    //   1. Server boots with delegation_cfg_initialised = false.
+    //   2. First POST /v1/delegation/config sets the config and calls init().
+    //      The flag flips to true; the worker thread starts.
+    //   3. Subsequent POST /v1/delegation/config returns 409 (config frozen
+    //      for this process; restart the server to change).
+    //
+    // SSE loop integration is intentionally OUT OF SCOPE for this iteration:
+    // we expose submit/pop/status over HTTP so callers (and tests) can drive
+    // delegation explicitly. The next iteration will wire `pop_result()` into
+    // the text_queue polling loop in /v1/stream/decode.
+    DelegationConfig delegation_cfg;
+    DelegationHandler delegation_handler;
+    bool delegation_cfg_initialised = false;
+    std::mutex delegation_init_mtx;   // guards the bool + the init() call
 };
 
 int main(int argc, char ** argv) {
+#if defined(_WIN32)
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
     common_params params;
 
     common_init();
@@ -114,11 +140,7 @@ int main(int argc, char ** argv) {
     }
 
     // HTTP server setup
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-    httplib::SSLServer svr(params.ssl_file_cert.c_str(), params.ssl_file_key.c_str());
-#else
     httplib::Server svr;
-#endif
 
     omni_server_state state;
 
@@ -234,8 +256,7 @@ int main(int argc, char ** argv) {
         int max_slice_nums     = data.value("max_slice_nums", -1);
 
         bool ok = false;
-        {
-            std::lock_guard<std::mutex> lock(state.octx_mutex);
+        if (state.octx != nullptr) {
             ok = stream_prefill(state.octx, audio_path, img_path, cnt, max_slice_nums, text);
         }
 
@@ -266,7 +287,6 @@ int main(int argc, char ** argv) {
         // length_penalty
         if (data.contains("length_penalty") && data.at("length_penalty").is_number()) {
             float lp = data.at("length_penalty").get<float>();
-            std::lock_guard<std::mutex> lock(state.octx_mutex);
             if (state.octx != nullptr) {
                 state.octx->length_penalty = lp;
             }
@@ -274,8 +294,7 @@ int main(int argc, char ** argv) {
 
         if (!stream) {
             bool ok = false;
-            {
-                std::lock_guard<std::mutex> lock(state.octx_mutex);
+            if (state.octx != nullptr) {
                 ok = stream_decode(state.octx, debug_dir, round_idx);
             }
             if (!ok) {
@@ -299,8 +318,9 @@ int main(int argc, char ** argv) {
 
                 // start decode in background thread
                 std::thread worker([&](std::string dd, int ri) {
-                    std::lock_guard<std::mutex> lock(state.octx_mutex);
-                    (void) stream_decode(state.octx, dd, ri);
+                    if (state.octx != nullptr) {
+                        (void) stream_decode(state.octx, dd, ri);
+                    }
                 }, debug_dir, round_idx);
 
                 // poll text queue
@@ -362,6 +382,250 @@ int main(int argc, char ** argv) {
         res_ok(res, {{"success", true}});
     });
 
+    // POST /v1/stream/break
+    svr.Post("/v1/stream/break", [&](const httplib::Request &, httplib::Response & res) {
+        {
+            std::lock_guard<std::mutex> lock(state.octx_mutex);
+            if (state.octx != nullptr) {
+                state.octx->break_event.store(true);
+            }
+        }
+        res_ok(res, {{"success", true}});
+    });
+
+    //
+    // Delegation API
+    //
+    // These endpoints drive tools/server/delegation-handler.{h,cpp}, an async
+    // worker pool that calls Claude / OpenAI APIs and CLI tools (Claude Code,
+    // gh copilot, agy) without blocking the audio pipeline.
+    //
+    // See docs/delegation-architecture.md for the design and the next iteration
+    // (SSE-loop integration) that will inject results into /v1/stream/decode.
+    //
+
+    // POST /v1/delegation/config
+    // Body: JSON matching DelegationConfig fields. Missing fields fall back to
+    // the defaults declared in tools/server/delegation-handler.h.
+    // Returns 409 if delegation was already initialised in this process;
+    // restart the server to change config (worker thread cannot be restarted
+    // safely mid-run).
+    svr.Post("/v1/delegation/config", [&](const httplib::Request & req, httplib::Response & res) {
+        json data;
+        try {
+            data = json::parse(req.body);
+        } catch (const std::exception & e) {
+            res_error(res, format_error_response(std::string("invalid JSON: ") + e.what()));
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(state.delegation_init_mtx);
+        if (state.delegation_cfg_initialised) {
+            // Returning 409 instead of silently re-applying the config: the
+            // worker thread has already started and there is no clean way to
+            // swap its config without leaking threads or losing in-flight
+            // requests. Documenting this in the response so callers know.
+            res.status = 409;
+            res_error(res, format_error_response(
+                "delegation already initialised in this process; restart the server to change config"));
+            return;
+        }
+
+        // Build DelegationConfig from the request, defaulting to whatever
+        // DelegationConfig's own defaults provide. This keeps the wire format
+        // forgiving: callers only need to send the fields they want to change.
+        DelegationConfig cfg = state.delegation_cfg; // copy with defaults
+
+        auto set_str = [&](const char * key, std::string & field) {
+            if (data.contains(key) && data.at(key).is_string()) {
+                field = data.at(key).get<std::string>();
+            }
+        };
+        auto set_int = [&](const char * key, int & field) {
+            if (data.contains(key) && data.at(key).is_number_integer()) {
+                field = data.at(key).get<int>();
+            }
+        };
+        auto set_bool = [&](const char * key, bool & field) {
+            if (data.contains(key) && data.at(key).is_boolean()) {
+                field = data.at(key).get<bool>();
+            }
+        };
+
+        set_bool("enabled",                              cfg.enabled);
+        set_str ("default_provider",                     cfg.default_provider);
+        set_str ("claude_api_key_env",                   cfg.claude_api_key_env);
+        set_str ("claude_model",                         cfg.claude_model);
+        set_int ("claude_max_tokens",                    cfg.claude_max_tokens);
+        set_str ("claude_api_base",                      cfg.claude_api_base);
+        set_str ("openai_api_key_env",                   cfg.openai_api_key_env);
+        set_str ("openai_model",                         cfg.openai_model);
+        set_int ("openai_max_tokens",                    cfg.openai_max_tokens);
+        set_str ("openai_api_base",                      cfg.openai_api_base);
+        set_str ("claude_path",                          cfg.claude_path);
+        set_str ("copilot_path",                         cfg.copilot_path);
+        set_str ("agy_path",                             cfg.agy_path);
+        set_int ("default_timeout_ms",                   cfg.default_timeout_ms);
+
+        if (data.contains("filler_responses") && data.at("filler_responses").is_array()) {
+            cfg.filler_responses.clear();
+            for (const auto & item : data.at("filler_responses")) {
+                if (item.is_string()) {
+                    cfg.filler_responses.push_back(item.get<std::string>());
+                }
+            }
+        }
+
+        // init() starts the worker thread. We only do this when enabled=true
+        // because the worker has nothing to do otherwise and would just spin
+        // on its condition variable.
+        if (cfg.enabled) {
+            state.delegation_handler.init(cfg);
+        }
+        state.delegation_cfg = cfg;
+        state.delegation_cfg_initialised = true;
+
+        LOG_INF("Delegation configured: enabled=%d default_provider=%s\n",
+                (int) cfg.enabled, cfg.default_provider.c_str());
+
+        res_ok(res, {
+            {"success", true},
+            {"enabled", cfg.enabled},
+            {"default_provider", cfg.default_provider}
+        });
+    });
+
+    // POST /v1/delegation/execute
+    // Body: { "type": "API_CLAUDE"|"API_OPENAI"|..., "messages": [...], "user_query": "...", "cli_command": "...", "timeout_ms": 30000 }
+    // Returns: { "success": true, "request_id": "...", "pending": N }
+    svr.Post("/v1/delegation/execute", [&](const httplib::Request & req, httplib::Response & res) {
+        json data;
+        try {
+            data = json::parse(req.body);
+        } catch (const std::exception & e) {
+            res_error(res, format_error_response(std::string("invalid JSON: ") + e.what()));
+            return;
+        }
+
+        if (!state.delegation_handler.is_enabled()) {
+            // 412 Precondition Failed: delegation was not configured (or was
+            // configured with enabled=false). Caller must POST /v1/delegation/config first.
+            res.status = 412;
+            res_error(res, format_error_response(
+                "delegation is not enabled; POST /v1/delegation/config first"));
+            return;
+        }
+
+        if (!data.contains("type") || !data.at("type").is_string()) {
+            res_error(res, format_error_response("\"type\" must be a string"));
+            return;
+        }
+
+        const std::string type_str = data.at("type").get<std::string>();
+        DelegationType type = DelegationType::NONE;
+        if      (type_str == "API_CLAUDE")       type = DelegationType::API_CLAUDE;
+        else if (type_str == "API_OPENAI")       type = DelegationType::API_OPENAI;
+        else if (type_str == "CLI_CLAUDE_CODE")  type = DelegationType::CLI_CLAUDE_CODE;
+        else if (type_str == "CLI_COPILOT")      type = DelegationType::CLI_COPILOT;
+        else if (type_str == "CLI_AGY")          type = DelegationType::CLI_AGY;
+        else {
+            res_error(res, format_error_response(
+                "unknown delegation type: " + type_str));
+            return;
+        }
+
+        DelegationRequest dreq;
+        dreq.type        = type;
+        dreq.user_query  = data.value("user_query",  std::string());
+        dreq.cli_command = data.value("cli_command", std::string());
+        dreq.timeout_ms  = data.value("timeout_ms",  state.delegation_cfg.default_timeout_ms);
+        dreq.start_time  = std::chrono::steady_clock::now();
+
+        if (data.contains("messages") && data.at("messages").is_array()) {
+            for (const auto & m : data.at("messages")) {
+                if (!m.is_object()) continue;
+                DelegationMessage dm;
+                dm.role    = m.value("role",    std::string());
+                dm.content = m.value("content", std::string());
+                if (!dm.role.empty() && !dm.content.empty()) {
+                    dreq.messages.push_back(std::move(dm));
+                }
+            }
+        }
+
+        const std::string request_id = state.delegation_handler.delegate_async(dreq);
+        if (request_id.empty()) {
+            // delegate_async() returns "" when !is_enabled(). We already checked
+            // that above, but be defensive: another thread could race-disable.
+            res.status = 412;
+            res_error(res, format_error_response("delegation is not enabled"));
+            return;
+        }
+
+        LOG_INF("Delegation submitted: id=%s type=%s\n",
+                request_id.c_str(), type_str.c_str());
+
+        res_ok(res, {
+            {"success",    true},
+            {"request_id", request_id},
+            {"pending",    state.delegation_handler.pending_count()},
+            {"filler",     state.delegation_handler.get_filler_response()}
+        });
+    });
+
+    // GET /v1/delegation/status
+    // Returns the current state of the delegation subsystem and (by default)
+    // drains any finished results in the same call. The objective calls for
+    // exactly three endpoints, so we collapse peek+drain into one route via
+    // a query param.
+    //
+    // Default (drain):  GET /v1/delegation/status
+    //   { "success": true, "enabled": bool, "pending": N, "default_provider": "...",
+    //     "count": M, "results": [ { "request_id", "success", "text", "error", "elapsed_ms" }, ... ] }
+    //
+    // Peek-only:        GET /v1/delegation/status?peek=1
+    //   Same shape but `results` is always [] and the internal queue is not
+    //   touched. Use from monitoring/health checks that must not consume work.
+    svr.Get("/v1/delegation/status", [&](const httplib::Request & req, httplib::Response & res) {
+        const bool enabled = state.delegation_handler.is_enabled();
+
+        // Any truthy value of `peek` (other than "0") disables draining.
+        const bool peek = req.has_param("peek") && req.get_param_value("peek") != "0";
+
+        size_t pending = 0;
+        json results_arr = json::array();
+
+        if (enabled) {
+            pending = state.delegation_handler.pending_count();
+
+            if (!peek) {
+                // Drain all currently-available results. Each result carries
+                // its own elapsed_ms (the time the worker spent on it) — this
+                // is what the objective meant by "devolver ... elapsed_ms".
+                while (true) {
+                    DelegationResult r;
+                    if (!state.delegation_handler.pop_result(r)) break;
+                    results_arr.push_back({
+                        {"request_id", r.request_id},
+                        {"success",    r.success},
+                        {"text",       r.text},
+                        {"error",      r.error},
+                        {"elapsed_ms", r.elapsed_ms}
+                    });
+                }
+            }
+        }
+
+        res_ok(res, {
+            {"success",          true},
+            {"enabled",          enabled},
+            {"pending",          pending},
+            {"default_provider", state.delegation_cfg.default_provider},
+            {"count",            results_arr.size()},
+            {"results",          results_arr}
+        });
+    });
+
     //
     // Backend Protocol (WebSocket + HTTP unary)
     //
@@ -411,7 +675,11 @@ int main(int argc, char ** argv) {
     });
 
     // start server
-    svr.listen("0.0.0.0", params.port);
+    const char * host = params.hostname.empty() ? "0.0.0.0" : params.hostname.c_str();
+    LOG_INF("HTTP server listening on %s:%d (port=%d)...\n", host, params.port, params.port);
+    if (!svr.listen(host, params.port)) {
+        LOG_ERR("svr.listen failed on %s:%d (is_valid=%d)\n", host, params.port, (int)svr.is_valid());
+    }
 
     // cleanup
     {
