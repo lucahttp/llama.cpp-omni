@@ -88,10 +88,25 @@ ggml_add_backend_library(ggml-hip
                         )
 
 if (WIN32)
+    if (NOT DEFINED ROCM_PATH OR ROCM_PATH STREQUAL "")
+        set(ROCM_PATH "C:/Users/lucas/.cache/lemonade/bin/therock/gfx103X-7.14.0")
+    endif()
     file(TO_CMAKE_PATH "${ROCM_PATH}" ROCM_PATH_CMAKE)
     target_compile_options(ggml-hip PRIVATE
         "--rocm-path=${ROCM_PATH_CMAKE}"
         "--rocm-device-lib-path=${ROCM_PATH_CMAKE}/lib/llvm/amdgcn/bitcode"
+        -O3
+        -munsafe-fp-atomics
+        -ffast-math
+        -fno-finite-math-only
+        -mwavefrontsize64
+        -mcode-object-version=5
+    )
+    
+    target_link_options(ggml-hip PRIVATE
+        -fuse-ld=lld
+        "-Wl,/OPT:REF"
+        "-Wl,/OPT:ICF"
     )
 endif()
 

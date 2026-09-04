@@ -109,11 +109,7 @@ struct omni_server_state {
 };
 
 int main(int argc, char ** argv) {
-<<<<<<< HEAD
-#if defined(_WIN32)
-=======
 #ifdef _WIN32
->>>>>>> feat/rocm-hip-windows
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
@@ -296,6 +292,22 @@ int main(int argc, char ** argv) {
             }
         }
 
+        // listen_prob_scale
+        if (data.contains("listen_prob_scale") && data.at("listen_prob_scale").is_number()) {
+            float lps = data.at("listen_prob_scale").get<float>();
+            if (state.octx != nullptr) {
+                state.octx->listen_prob_scale = lps;
+            }
+        }
+
+        // speak_prob_scale
+        if (data.contains("speak_prob_scale") && data.at("speak_prob_scale").is_number()) {
+            float sps = data.at("speak_prob_scale").get<float>();
+            if (state.octx != nullptr) {
+                state.octx->speak_prob_scale = sps;
+            }
+        }
+
         if (!stream) {
             bool ok = false;
             if (state.octx != nullptr) {
@@ -321,17 +333,19 @@ int main(int argc, char ** argv) {
                 }
 
                 // start decode in background thread
+                std::atomic<bool> worker_finished{false};
                 std::thread worker([&](std::string dd, int ri) {
                     if (state.octx != nullptr) {
                         (void) stream_decode(state.octx, dd, ri);
                     }
+                    worker_finished.store(true);
                 }, debug_dir, round_idx);
 
                 // poll text queue
                 while (true) {
                     std::unique_lock<std::mutex> lk(state.octx->text_mtx);
-                    state.octx->text_cv.wait_for(lk, std::chrono::milliseconds(200), [&]{
-                        return !state.octx->text_queue.empty() || state.octx->text_done_flag;
+                    state.octx->text_cv.wait_for(lk, std::chrono::milliseconds(50), [&]{
+                        return !state.octx->text_queue.empty() || state.octx->text_done_flag || worker_finished.load();
                     });
 
                     while (!state.octx->text_queue.empty()) {
@@ -355,7 +369,7 @@ int main(int argc, char ** argv) {
                         lk.lock();
                     }
 
-                    if (state.octx->text_done_flag) break;
+                    if (state.octx->text_done_flag || (worker_finished.load() && state.octx->text_queue.empty())) break;
                 }
 
                 if (worker.joinable()) worker.join();
@@ -363,7 +377,8 @@ int main(int argc, char ** argv) {
                 // send done
                 static const std::string ev_done = "data: [DONE]\n\n";
                 sink.write(ev_done.data(), ev_done.size());
-                return true;
+                sink.done();
+                return false;
             });
     });
 
@@ -381,6 +396,16 @@ int main(int argc, char ** argv) {
             if (media_type > 0) {
                 state.octx->media_type = media_type;
             }
+            if (data.contains("listen_prob_scale") && data.at("listen_prob_scale").is_number()) {
+                state.octx->listen_prob_scale = data.at("listen_prob_scale").get<float>();
+            }
+            if (data.contains("speak_prob_scale") && data.at("speak_prob_scale").is_number()) {
+                state.octx->speak_prob_scale = data.at("speak_prob_scale").get<float>();
+            }
+            if (data.contains("force_listen_count") && data.at("force_listen_count").is_number_integer()) {
+                state.octx->force_listen_count = data.at("force_listen_count").get<int>();
+                state.octx->force_listen_used = 0;
+            }
         }
 
         res_ok(res, {{"success", true}});
@@ -397,7 +422,6 @@ int main(int argc, char ** argv) {
         res_ok(res, {{"success", true}});
     });
 
-<<<<<<< HEAD
     //
     // Delegation API
     //

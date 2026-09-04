@@ -301,6 +301,10 @@ struct omni_context {
     // 1.0: Python 默认
     float listen_prob_scale = 1.0f;
 
+    // speak_prob_scale: 调整 <|speak|> token 的采样概率
+    // 1.0: 默认，> 1.0 增加说话概率
+    float speak_prob_scale = 1.0f;
+
     // 会话开局强制 LISTEN 的 chunk 数（与 Python duplex_config.force_listen_count 对齐）
     // 防止 browser 打开 MediaStreamTrack 时的瞬态噪声 + 强 system prompt 组合
     // 导致模型在第一 chunk 就 SPEAK 产生"抢答"。

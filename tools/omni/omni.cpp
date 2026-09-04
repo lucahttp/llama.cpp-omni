@@ -1340,6 +1340,12 @@ static const char * sample_with_hidden_and_token(struct common_sampler * smpl, s
                 logits[ctx_omni->special_token_listen] += listen_bias;
             }
             
+            // 1b. 调整 <|speak|> 的 logit (speak_prob_scale)
+            if (ctx_omni->special_token_speak >= 0) {
+                float speak_bias = (ctx_omni->speak_prob_scale - 1.0f) * 2.0f;
+                logits[ctx_omni->special_token_speak] += speak_bias;
+            }
+            
             // 2. 🔧 [与 Python 对齐] 禁止采样 <|tts_pad|> token
             // Python: self.forbidden_token_ids = [self.tts_pad_id] + list(bad_token_ids)
             //         logits[:, self.forbidden_token_ids] = float("-inf")
@@ -6134,6 +6140,11 @@ static void move_old_output_to_archive() {
 
 // Helper function to merge all WAV files into a single file
 static void merge_wav_files(const std::string& output_dir, int num_chunks) {
+    // In streaming duplex mode, chunks are streamed directly to the frontend.
+    // Executing blocking shell system() calls for ffmpeg/sox introduces massive stalls.
+    if (!getenv("OMNI_MERGE_WAV")) {
+        return;
+    }
     if (num_chunks == 0) {
         LOG_WRN("TTS: no chunks to merge\n");
         return;
@@ -6587,9 +6598,8 @@ void tts_thread_func_duplex(struct omni_context * ctx_omni, common_params *param
                 }
             }
             
-            // 🔧 [双工模式] 保存 LLM debug 数据（追加模式，统一放在 llm_debug 目录）
-            // Save LLM debug data: text, token_ids, hidden_states, and merged embeddings
-            {
+            // 🔧 [双工模式] 保存 LLM debug 数据（只有在设置了 OMNI_DEBUG_DUMP 环境变量时才写盘，避免阻塞实时音频生成）
+            if (getenv("OMNI_DEBUG_DUMP")) {
                 // 1. Save LLM text output (追加模式，只记录纯文本，不记录 special tokens)
                 {
                     // 从 llm_text 中过滤掉 special tokens
@@ -9836,6 +9846,7 @@ static bool duplex_do_decode(omni_context * ctx_omni, common_params * params,
 
     // decode 开始时的 cache 长度（prefill 已完成写入，这里取值才准确）
     int decode_start_cache_len = ctx_omni->n_past;
+    bool was_speaking = !ctx_omni->slide_last_was_listen.load();
 
     // ---- force_listen：会话开局强制 LISTEN N 次 ----
     if (ctx_omni->force_listen_used < ctx_omni->force_listen_count) {
@@ -10063,12 +10074,14 @@ static bool duplex_do_decode(omni_context * ctx_omni, common_params * params,
         }
     }
 
-    // ---- round boundary（duplex 下仅在 LISTEN 结束时记录） ----
-    if (ctx_omni->ended_with_listen) {
+    // ---- round boundary（duplex 下仅在 SPEAK -> LISTEN 转换或 turn_eos 结束时记录） ----
+    bool turn_just_finished = (was_speaking && ctx_omni->ended_with_listen.load()) || ctx_omni->current_turn_ended;
+    if (turn_just_finished) {
         ctx_omni->round_start_positions.push_back(ctx_omni->n_past);
         print_with_timestamp("Duplex decode: round boundary at n_past=%d, total=%zu\n",
                              ctx_omni->n_past, ctx_omni->round_start_positions.size());
         ctx_omni->current_turn_id++;
+        ctx_omni->current_turn_ended = false;
     }
 
     auto t_dec_end = std::chrono::high_resolution_clock::now();
@@ -10133,6 +10146,13 @@ static void duplex_llm_thread_func(omni_context * ctx_omni, common_params * para
                     dup->pending_decode->ok.store(false);
                     dup->pending_decode = nullptr;
                     dup->decode_done_cv.notify_all();
+                }
+                ctx_omni->break_event.store(false);
+                {
+                    std::lock_guard<std::mutex> tl(ctx_omni->text_mtx);
+                    ctx_omni->text_done_flag = true;
+                    ctx_omni->text_streaming = false;
+                    ctx_omni->text_cv.notify_all();
                 }
                 lk.unlock();
                 dup->llm_cv.notify_all();
@@ -10895,6 +10915,9 @@ bool stream_decode(struct omni_context * ctx_omni, std::string debug_dir, int ro
         std::vector<float> chunk_hidden_states;
         int llm_n_embd = llama_n_embd(llama_get_model(ctx_omni->ctx_llama));
         
+        chunk_token_ids.reserve(step_size);
+        chunk_hidden_states.reserve(step_size * llm_n_embd);
+
         // 🔧 [修复双工缺字问题] 每个 chunk 开始时重置 is_end_of_turn 状态
         // 只有当检测到 TURN_EOS/TTS_EOS/EOS 时才会在下面设置为 true
         local_is_end_of_turn = false;

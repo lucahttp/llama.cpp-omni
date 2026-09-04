@@ -240,6 +240,9 @@ static void apply_session_config(common_params & params, omni_context * octx, co
     if (init.config.contains("listen_prob_scale") && init.config.at("listen_prob_scale").is_number()) {
         octx->listen_prob_scale = init.config.at("listen_prob_scale").get<float>();
     }
+    if (init.config.contains("speak_prob_scale") && init.config.at("speak_prob_scale").is_number()) {
+        octx->speak_prob_scale = init.config.at("speak_prob_scale").get<float>();
+    }
     if (init.config.contains("force_listen_count") && init.config.at("force_listen_count").is_number_integer()) {
         octx->force_listen_count = init.config.at("force_listen_count").get<int>();
         octx->force_listen_used = 0;
